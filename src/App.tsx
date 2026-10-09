@@ -2019,7 +2019,7 @@ function App() {
           </section>
           <section className="weekly-quests" aria-labelledby="weekly-quests-title">
             <div className="weekly-quests-heading">
-              <div><span className="eyebrow">YOUR WEEKLY SPOTLIGHT</span><h2 id="weekly-quests-title">Your mini-quests for this week</h2><p>Fresh, practical missions for {activeSkillName.toLowerCase()}{visibleRoadmap ? ", shaped by your AI roadmap" : goal.trim() ? " and tailored to the goal you shared" : ""}. Complete them at your own pace; new quests arrive every Monday.</p></div>
+              <div><span className="eyebrow">YOUR WEEKLY SPOTLIGHT</span><h2 id="weekly-quests-title">Your mini-quests for this week</h2><p>Fresh, practical missions for {activeSkillName.toLowerCase()}{visibleRoadmap ? ", shaped by your AI roadmap" : goal.trim() ? " and tailored to the goal you shared" : ""}. Complete them at your own pace; new quests arrive every week.</p></div>
               <div className="quest-week-badge" aria-label="Weekly quest cycle, 1 of 7"><Icon name="target" size={16} />1/7</div>
             </div>
             <div className="quest-progress" aria-label="Weekly quest progress">
