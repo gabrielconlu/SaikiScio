@@ -3,9 +3,13 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "vite",
     "dev:api": "node --env-file=.env server/index.mjs",
+    "db:setup": "node server/setup-database.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
   },

@@ -25,13 +25,32 @@ type Skill = {
 
 type LearningMethod = "Short lessons" | "Hands-on projects" | "Reading" | "Videos" | "Guided practice";
 type JourneyPage = "assessment" | "results";
-type CookiePreferences = { analytics: boolean };
 type AuthUser = { id: string; email: string };
-type LegalPath = "/terms" | "/privacy" | "/cookies";
+type DemoEmailMessage = { id: string; to: string; subject: string; purpose: string; link: string; createdAt: string };
+type LegalPath = "/terms" | "/privacy" | "/cookies" | "/support";
+type GeneratedRoadmap = {
+  summary: string;
+  actionItems: { title: string; instructions: string }[];
+  milestones: { stage: string; measurableOutcome: string }[];
+  practiceRoutine: {
+    frequency: string;
+    sessionsPerWeek: number;
+    totalMinutes: number;
+    segments: { activity: string; minutes: number; instructions: string }[];
+  };
+};
+
+type RoadmapInputs = {
+  skill: string;
+  explanation: string;
+  weeklyHours: number;
+};
 
 type SavedProgress = {
   step: number;
   selectedSkills: string[];
+  generatedRoadmap: GeneratedRoadmap | null;
+  generatedRoadmapInputs: RoadmapInputs | null;
   goal: string;
   confidence: Record<string, number>;
   selectedMethods: LearningMethod[];
@@ -40,6 +59,8 @@ type SavedProgress = {
   savedPage: JourneyPage;
   started: boolean;
   completedTasks: number[];
+  roadmapPracticeNotes: Record<string, string>;
+  completedMilestones: number[];
   activeLearningSkill: string;
   activeLesson: LearningMethod | null;
   completedActivities: string[];
@@ -49,8 +70,6 @@ type SavedProgress = {
 };
 
 const progressStorageKey = "saikiscio-progress-v1";
-const cookieStorageKey = "saikiscio-cookie-preferences-v1";
-
 const skills: Skill[] = [
   { name: "Communication", category: "People", icon: "◌", tint: "peach", description: "Share ideas with clarity and confidence." },
   { name: "Problem solving", category: "Thinking", icon: "⌘", tint: "lilac", description: "Find a way forward when things get complex." },
@@ -339,8 +358,24 @@ function parseSavedProgress(raw: string | null): SavedProgress | null {
     const item = value as Record<string, unknown>;
     const isLearningMethod = (method: unknown): method is LearningMethod =>
       methods.some((candidate) => candidate.name === method);
+    const generatedRoadmap = item.generatedRoadmap == null
+      ? null
+      : parseGeneratedRoadmap(item.generatedRoadmap);
+    const roadmapInputs = item.generatedRoadmapInputs;
+    const generatedRoadmapInputs =
+      typeof roadmapInputs === "object" &&
+      roadmapInputs !== null &&
+      !Array.isArray(roadmapInputs) &&
+      typeof (roadmapInputs as Record<string, unknown>).skill === "string" &&
+      typeof (roadmapInputs as Record<string, unknown>).explanation === "string" &&
+      Number.isInteger((roadmapInputs as Record<string, unknown>).weeklyHours) &&
+      ((roadmapInputs as Record<string, unknown>).weeklyHours as number) >= 1 &&
+      ((roadmapInputs as Record<string, unknown>).weeklyHours as number) <= 10
+        ? roadmapInputs as RoadmapInputs
+        : null;
     if (
       typeof item.step !== "number" || !Array.isArray(item.selectedSkills) ||
+      (item.generatedRoadmap != null && !generatedRoadmap) ||
       typeof item.goal !== "string" || typeof item.confidence !== "object" || item.confidence === null ||
       !Array.isArray(item.selectedMethods) || typeof item.hours !== "number" ||
       typeof item.targetDate !== "string" || (item.savedPage !== "assessment" && item.savedPage !== "results") ||
@@ -353,7 +388,9 @@ function parseSavedProgress(raw: string | null): SavedProgress | null {
     ) throw new Error("Saved progress has an unexpected format.");
     return {
       step: Math.min(2, Math.max(0, Math.floor(item.step))),
-      selectedSkills: item.selectedSkills.filter((skill): skill is string => typeof skill === "string" && skills.some((candidate) => candidate.name === skill)),
+      selectedSkills: item.selectedSkills.filter((skill): skill is string => typeof skill === "string" && skill.trim().length > 0 && skill.length <= 180).slice(0, 5),
+      generatedRoadmap,
+      generatedRoadmapInputs,
       goal: item.goal,
       confidence: Object.fromEntries(Object.entries(item.confidence).filter((entry): entry is [string, number] => typeof entry[1] === "number")),
       selectedMethods: item.selectedMethods.filter(isLearningMethod),
@@ -362,7 +399,13 @@ function parseSavedProgress(raw: string | null): SavedProgress | null {
       savedPage: item.savedPage,
       started: item.started,
       completedTasks: item.completedTasks.filter((task): task is number => typeof task === "number" && Number.isInteger(task)),
-      activeLearningSkill: skills.some((skill) => skill.name === item.activeLearningSkill) ? item.activeLearningSkill : skills[0].name,
+      roadmapPracticeNotes: typeof item.roadmapPracticeNotes === "object" && item.roadmapPracticeNotes !== null
+        ? Object.fromEntries(Object.entries(item.roadmapPracticeNotes).filter((entry): entry is [string, string] => typeof entry[1] === "string").map(([key, note]) => [key, note.slice(0, 600)]))
+        : {},
+      completedMilestones: Array.isArray(item.completedMilestones)
+        ? item.completedMilestones.filter((milestone): milestone is number => typeof milestone === "number" && Number.isInteger(milestone))
+        : [],
+      activeLearningSkill: typeof item.activeLearningSkill === "string" && item.activeLearningSkill.length <= 180 ? item.activeLearningSkill : skills[0].name,
       activeLesson: item.activeLesson,
       completedActivities: item.completedActivities.filter((activity): activity is string => typeof activity === "string"),
       activityNotes: Object.fromEntries(Object.entries(item.activityNotes).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
@@ -375,27 +418,81 @@ function parseSavedProgress(raw: string | null): SavedProgress | null {
   }
 }
 
+function parseGeneratedRoadmap(value: unknown): GeneratedRoadmap | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const roadmap = value as Record<string, unknown>;
+  const isText = (entry: unknown): entry is string =>
+    typeof entry === "string" && entry.trim().length > 0 && entry.length <= 1200;
+  const isTextPairList = (entry: unknown, first: string, second: string, min: number, max: number) =>
+    Array.isArray(entry) &&
+    entry.length >= min &&
+    entry.length <= max &&
+    entry.every((item) =>
+      typeof item === "object" &&
+      item !== null &&
+      !Array.isArray(item) &&
+      isText((item as Record<string, unknown>)[first]) &&
+      isText((item as Record<string, unknown>)[second])
+    );
+  const routine = roadmap.practiceRoutine;
+  if (
+    !isText(roadmap.summary) ||
+    !isTextPairList(roadmap.actionItems, "title", "instructions", 3, 4) ||
+    !isTextPairList(roadmap.milestones, "stage", "measurableOutcome", 3, 3) ||
+    typeof routine !== "object" ||
+    routine === null ||
+    Array.isArray(routine)
+  ) return null;
+
+  const routineRecord = routine as Record<string, unknown>;
+  const segments = routineRecord.segments;
+  if (
+    !isText(routineRecord.frequency) ||
+    !Number.isInteger(routineRecord.sessionsPerWeek) ||
+    (routineRecord.sessionsPerWeek as number) < 1 ||
+    (routineRecord.sessionsPerWeek as number) > 7 ||
+    !Number.isInteger(routineRecord.totalMinutes) ||
+    !Array.isArray(segments) ||
+    segments.length < 2 ||
+    segments.length > 4 ||
+    !segments.every((segment) =>
+      typeof segment === "object" &&
+      segment !== null &&
+      !Array.isArray(segment) &&
+      isText((segment as Record<string, unknown>).activity) &&
+      Number.isInteger((segment as Record<string, unknown>).minutes) &&
+      ((segment as Record<string, unknown>).minutes as number) > 0 &&
+      isText((segment as Record<string, unknown>).instructions)
+    ) ||
+    segments.reduce((sum, segment) => sum + (segment as { minutes: number }).minutes, 0) !== routineRecord.totalMinutes
+  ) return null;
+
+  return value as GeneratedRoadmap;
+}
+
+function roadmapMatchesInputs(roadmap: GeneratedRoadmap, inputs: RoadmapInputs): boolean {
+  const ignoredTerms = new Set([
+    "about", "after", "also", "become", "could", "from", "goal", "good", "have",
+    "into", "just", "learn", "like", "make", "more", "much", "need", "practice",
+    "skill", "some", "that", "their", "there", "these", "they", "this", "want",
+    "what", "when", "where", "with", "would", "your",
+  ]);
+  const targets = `${inputs.skill} ${inputs.explanation}`
+    .toLowerCase()
+    .match(/[a-z0-9]{4,}/g)
+    ?.filter((term) => !ignoredTerms.has(term)) ?? [];
+  if (targets.length === 0) return true;
+
+  const content = JSON.stringify(roadmap).toLowerCase();
+  return targets.some((term) => content.includes(term));
+}
+
 function readSavedProgress(): SavedProgress | null {
   try {
     return parseSavedProgress(window.localStorage.getItem(progressStorageKey));
   } catch (error) {
     console.warn("Unable to read SaikiScio progress from this browser.", error);
     return null;
-  }
-}
-
-function readCookiePreferences(): CookiePreferences {
-  try {
-    const raw = window.localStorage.getItem(cookieStorageKey);
-    if (!raw) return { analytics: false };
-    const value: unknown = JSON.parse(raw);
-    if (typeof value === "object" && value !== null && "analytics" in value && typeof value.analytics === "boolean") {
-      return { analytics: value.analytics };
-    }
-    throw new Error("Cookie preferences have an unexpected format.");
-  } catch (error) {
-    console.warn("Unable to read SaikiScio cookie preferences from this browser.", error);
-    return { analytics: false };
   }
 }
 
@@ -443,13 +540,18 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
 }
 
 function App() {
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
   const navigate = useNavigate();
   const [savedProgress, setSavedProgress] = useState(readSavedProgress);
   const [journeyTouched, setJourneyTouched] = useState(() => savedProgress !== null);
   const [page, setPage] = useState<"home" | "assessment" | "results">("home");
   const [step, setStep] = useState(savedProgress?.step ?? 0);
   const [selectedSkills, setSelectedSkills] = useState<string[]>(savedProgress?.selectedSkills.length ? savedProgress.selectedSkills : ["Communication"]);
+  const [customSkillDraft, setCustomSkillDraft] = useState("");
+  const [generatedRoadmap, setGeneratedRoadmap] = useState<GeneratedRoadmap | null>(savedProgress?.generatedRoadmap ?? null);
+  const [generatedRoadmapInputs, setGeneratedRoadmapInputs] = useState<RoadmapInputs | null>(savedProgress?.generatedRoadmapInputs ?? null);
+  const [roadmapError, setRoadmapError] = useState("");
+  const [roadmapBusy, setRoadmapBusy] = useState(false);
   const [goal, setGoal] = useState(savedProgress?.goal ?? "");
   const [confidence, setConfidence] = useState<Record<string, number>>(savedProgress?.confidence ?? {});
   const [selectedMethods, setSelectedMethods] = useState<LearningMethod[]>(savedProgress?.selectedMethods.length ? savedProgress.selectedMethods : ["Hands-on projects", "Short lessons"]);
@@ -458,13 +560,17 @@ function App() {
   const [savedPage, setSavedPage] = useState<JourneyPage>(savedProgress?.savedPage ?? "assessment");
   const [started, setStarted] = useState(savedProgress?.started ?? false);
   const [completedTasks, setCompletedTasks] = useState<number[]>(savedProgress?.completedTasks ?? []);
+  const [roadmapPracticeNotes, setRoadmapPracticeNotes] = useState<Record<string, string>>(savedProgress?.roadmapPracticeNotes ?? {});
+  const [completedMilestones, setCompletedMilestones] = useState<number[]>(savedProgress?.completedMilestones ?? []);
+  const [activeRoadmapPractice, setActiveRoadmapPractice] = useState<number | null>(null);
   const [activeLearningSkill, setActiveLearningSkill] = useState(savedProgress?.activeLearningSkill ?? "Communication");
   const [activeLesson, setActiveLesson] = useState<LearningMethod | null>(savedProgress?.activeLesson ?? null);
   const [completedActivities, setCompletedActivities] = useState<string[]>(savedProgress?.completedActivities ?? []);
   const [activityNotes, setActivityNotes] = useState<Record<string, string>>(savedProgress?.activityNotes ?? {});
   const [projectChecks, setProjectChecks] = useState<Record<string, boolean[]>>(savedProgress?.projectChecks ?? {});
   const [videoScenes, setVideoScenes] = useState<Record<string, number>>(savedProgress?.videoScenes ?? {});
-  const [cookiePreferences, setCookiePreferences] = useState(readCookiePreferences);
+  const [cookieNotice, setCookieNotice] = useState("");
+  const [supportNotice, setSupportNotice] = useState("");
   const [storageError, setStorageError] = useState("");
   const [databaseNotice, setDatabaseNotice] = useState("");
   const [accountRetry, setAccountRetry] = useState(0);
@@ -478,6 +584,10 @@ function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState("");
   const [authNotice, setAuthNotice] = useState("");
+  const [emailPreviewAvailable, setEmailPreviewAvailable] = useState(false);
+  const [emailFlowsAvailable, setEmailFlowsAvailable] = useState(false);
+  const [demoEmails, setDemoEmails] = useState<DemoEmailMessage[]>([]);
+  const [demoEmailError, setDemoEmailError] = useState("");
   const [accountPassword, setAccountPassword] = useState("");
   const [newAccountPassword, setNewAccountPassword] = useState("");
   const [accountMessage, setAccountMessage] = useState("");
@@ -490,11 +600,26 @@ function App() {
     () => buildLearningPlan(selectedSkills, goal, confidence, selectedMethods, hours),
     [selectedSkills, goal, confidence, selectedMethods, hours],
   );
+  const currentRoadmapInputs: RoadmapInputs = {
+    skill: selectedSkills.join(", "),
+    explanation: goal,
+    weeklyHours: hours,
+  };
+  const visibleRoadmap =
+    generatedRoadmap &&
+    generatedRoadmapInputs?.skill === currentRoadmapInputs.skill &&
+    generatedRoadmapInputs.explanation === currentRoadmapInputs.explanation &&
+    generatedRoadmapInputs.weeklyHours === currentRoadmapInputs.weeklyHours &&
+    roadmapMatchesInputs(generatedRoadmap, currentRoadmapInputs)
+      ? generatedRoadmap
+      : null;
 
   const applyProgress = (progress: SavedProgress) => {
     setSavedProgress(progress);
     setStep(progress.step);
     setSelectedSkills(progress.selectedSkills.length ? progress.selectedSkills : ["Communication"]);
+    setGeneratedRoadmap(progress.generatedRoadmap);
+    setGeneratedRoadmapInputs(progress.generatedRoadmapInputs);
     setGoal(progress.goal);
     setConfidence(progress.confidence);
     setSelectedMethods(progress.selectedMethods.length ? progress.selectedMethods : ["Hands-on projects", "Short lessons"]);
@@ -503,6 +628,8 @@ function App() {
     setSavedPage(progress.savedPage);
     setStarted(progress.started);
     setCompletedTasks(progress.completedTasks);
+    setRoadmapPracticeNotes(progress.roadmapPracticeNotes);
+    setCompletedMilestones(progress.completedMilestones);
     setActiveLearningSkill(progress.activeLearningSkill);
     setActiveLesson(progress.activeLesson);
     setCompletedActivities(progress.completedActivities);
@@ -517,6 +644,8 @@ function App() {
     const progress: SavedProgress = {
       step,
       selectedSkills,
+      generatedRoadmap,
+      generatedRoadmapInputs,
       goal,
       confidence,
       selectedMethods,
@@ -525,6 +654,8 @@ function App() {
       savedPage,
       started,
       completedTasks,
+      roadmapPracticeNotes,
+      completedMilestones,
       activeLearningSkill,
       activeLesson,
       completedActivities,
@@ -540,11 +671,23 @@ function App() {
       console.error("Unable to save SaikiScio progress in this browser.", saveError);
       setStorageError("Your browser could not save this update. Check its storage settings or export your notes before leaving.");
     }
-  }, [journeyTouched, step, selectedSkills, goal, confidence, selectedMethods, hours, targetDate, savedPage, started, completedTasks, activeLearningSkill, activeLesson, completedActivities, activityNotes, projectChecks, videoScenes]);
+  }, [journeyTouched, step, selectedSkills, generatedRoadmap, generatedRoadmapInputs, goal, confidence, selectedMethods, hours, targetDate, savedPage, started, completedTasks, roadmapPracticeNotes, completedMilestones, activeLearningSkill, activeLesson, completedActivities, activityNotes, projectChecks, videoScenes]);
 
   useEffect(() => {
     let active = true;
     const initializeAccount = async () => {
+      try {
+        const configResponse = await fetch("/api/auth/config");
+        if (!configResponse.ok) throw new Error(`Authentication configuration request failed with status ${configResponse.status}.`);
+        const config: { demoEmailPreviewAvailable?: boolean; emailVerificationAvailable?: boolean; passwordRecoveryAvailable?: boolean } = await configResponse.json();
+        if (active) {
+          const emailFlowsEnabled = Boolean(config.emailVerificationAvailable && config.passwordRecoveryAvailable);
+          setEmailFlowsAvailable(emailFlowsEnabled);
+          setEmailPreviewAvailable(Boolean(config.demoEmailPreviewAvailable));
+        }
+      } catch (configError) {
+        console.warn("Unable to load SaikiScio email feature availability.", configError);
+      }
       try {
         const response = await fetch("/api/auth/me");
         if (!response.ok) throw new Error(`Session check failed with status ${response.status}.`);
@@ -616,15 +759,6 @@ function App() {
     return () => window.clearTimeout(timeout);
   }, [accountSyncReady, currentUser, journeyTouched, savedProgress]);
 
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(cookieStorageKey, JSON.stringify(cookiePreferences));
-    } catch (saveError) {
-      console.error("Unable to save SaikiScio cookie preferences in this browser.", saveError);
-      setStorageError("Your browser could not save your preferences. Check its storage settings.");
-    }
-  }, [cookiePreferences]);
-
   const hasSavedProgress = savedProgress !== null;
 
   const retryAccountSync = async () => {
@@ -667,6 +801,9 @@ function App() {
   const beginAssessment = () => {
     setStep(0);
     setError("");
+    setGeneratedRoadmap(null);
+    setGeneratedRoadmapInputs(null);
+    setRoadmapError("");
     setJourneyTouched(true);
     setSavedPage("assessment");
     setPage("assessment");
@@ -682,6 +819,22 @@ function App() {
     setError("");
   };
 
+  const addCustomSkill = () => {
+    const name = customSkillDraft.trim().replace(/\s+/g, " ");
+    if (!name) {
+      setError("Enter a skill or area you want to learn.");
+      return;
+    }
+    if (name.length > 180) {
+      setError("Keep the skill name under 180 characters.");
+      return;
+    }
+    setSelectedSkills([name]);
+    setActiveLearningSkill(name);
+    setCustomSkillDraft("");
+    setError("");
+  };
+
   const toggleMethod = (name: LearningMethod) => {
     setSelectedMethods((current) =>
       current.includes(name)
@@ -691,9 +844,49 @@ function App() {
     setError("");
   };
 
-  const continueAssessment = () => {
-    if (step === 0 && !goal.trim()) {
-      setError("Add a goal or choose a suggested prompt to continue.");
+  const generatePersonalizedRoadmap = async () => {
+    const inputs: RoadmapInputs = {
+      skill: selectedSkills.join(", "),
+      explanation: goal,
+      weeklyHours: hours,
+    };
+    setRoadmapBusy(true);
+    setRoadmapError("");
+    setGeneratedRoadmap(null);
+    setGeneratedRoadmapInputs(null);
+    try {
+      const response = await fetch("/api/roadmap/generate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(inputs),
+      });
+      const result: { roadmap?: unknown; error?: string } = await response.json();
+      if (!response.ok) throw new Error(result.error ?? `Roadmap request failed with status ${response.status}.`);
+      const roadmap = parseGeneratedRoadmap(result.roadmap);
+      if (!roadmap) throw new Error("The AI service returned an incomplete roadmap. Please try again.");
+      if (!roadmapMatchesInputs(roadmap, inputs)) {
+        throw new Error("The AI service returned a roadmap that does not match your skill or goal. Please try again.");
+      }
+      setCompletedTasks([]);
+      setRoadmapPracticeNotes({});
+      setCompletedMilestones([]);
+      setActiveRoadmapPractice(null);
+      setStarted(false);
+      setGeneratedRoadmap(roadmap);
+      setGeneratedRoadmapInputs(inputs);
+      return true;
+    } catch (generationError) {
+      console.error("SaikiScio AI roadmap generation failed.", generationError);
+      setRoadmapError(generationError instanceof Error ? generationError.message : "Unable to generate a roadmap. Please try again.");
+      return false;
+    } finally {
+      setRoadmapBusy(false);
+    }
+  };
+
+  const continueAssessment = async () => {
+    if (step === 0 && selectedSkills.length === 0) {
+      setError("Choose a skill or add any skill you want to learn.");
       return;
     }
     if (step === 2 && selectedMethods.length === 0) {
@@ -703,10 +896,14 @@ function App() {
     setError("");
     if (step < 2) setStep((current) => current + 1);
     else {
-      setSavedPage("results");
-      setPage("results");
       setStarted(false);
       setCompletedTasks([]);
+      setRoadmapPracticeNotes({});
+      setCompletedMilestones([]);
+      setActiveRoadmapPractice(null);
+      await generatePersonalizedRoadmap();
+      setSavedPage("results");
+      setPage("results");
     }
   };
 
@@ -721,6 +918,12 @@ function App() {
   const toggleTask = (index: number) => {
     setCompletedTasks((current) =>
       current.includes(index) ? current.filter((task) => task !== index) : [...current, index],
+    );
+  };
+
+  const toggleMilestone = (index: number) => {
+    setCompletedMilestones((current) =>
+      current.includes(index) ? current.filter((milestone) => milestone !== index) : [...current, index],
     );
   };
 
@@ -752,6 +955,8 @@ function App() {
     setSavedPage("assessment");
     setStarted(false);
     setCompletedTasks([]);
+    setGeneratedRoadmap(null);
+    setGeneratedRoadmapInputs(null);
     setActiveLearningSkill("Communication");
     setActiveLesson(null);
     setCompletedActivities([]);
@@ -800,7 +1005,15 @@ function App() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ email: authEmail, password: authPassword, legacyDeviceId: readLegacyDeviceId() }),
       });
-      const result: { user?: AuthUser; error?: string } = await response.json();
+      const result: { user?: AuthUser; status?: string; emailPreviewAvailable?: boolean; emailVerificationRequired?: boolean; error?: string } = await response.json();
+      if (isRegister && response.ok && result.status === "verification-required") {
+        setEmailPreviewAvailable(result.emailPreviewAvailable ?? false);
+        setAuthPassword("");
+        setAuthPasswordConfirm("");
+        setAuthNotice("Account created. Verify your email before signing in.");
+        setAccountSyncReady(true);
+        return;
+      }
       if (!response.ok || !result.user) throw new Error(result.error ?? "Unable to complete sign in.");
       const user = result.user;
       const progressResponse = await fetch("/api/progress");
@@ -822,12 +1035,15 @@ function App() {
         setPage(savedProgress.savedPage === "results" ? "results" : "assessment");
       }
       setCurrentUser(user);
+      if (isRegister && result.emailVerificationRequired === false) {
+        setAccountMessage("Account created and signed in. No verification email was sent, and password recovery is unavailable in this deployment. Keep your password safe.");
+      }
       setDatabaseNotice("");
       setAuthPassword("");
       setAuthPasswordConfirm("");
       setAuthInitialized(true);
       setAccountSyncReady(true);
-      navigate("/");
+      navigate(isRegister && result.emailVerificationRequired === false ? "/account" : "/");
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (submitError) {
       console.error("SaikiScio authentication request failed.", submitError);
@@ -835,6 +1051,83 @@ function App() {
       setAccountSyncReady(true);
     } finally {
       setAuthBusy(false);
+    }
+  };
+
+  const submitEmailFlow = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setAuthError("");
+    setAuthNotice("");
+    setAuthBusy(true);
+    const token = new URLSearchParams(search).get("token");
+    let endpoint = "";
+    let payload: Record<string, string> = {};
+
+    if (pathname === "/verify-email" && token) {
+      endpoint = "/api/auth/verify-email";
+      payload = { token };
+    } else if (pathname === "/reset-password") {
+      if (!token) {
+        setAuthError("This reset link is missing its token. Request a new link and try again.");
+        setAuthBusy(false);
+        return;
+      }
+      if (newAccountPassword !== authPasswordConfirm) {
+        setAuthError("The passwords do not match.");
+        setAuthBusy(false);
+        return;
+      }
+      endpoint = "/api/auth/password-reset/confirm";
+      payload = { token, password: newAccountPassword };
+    } else {
+      endpoint = pathname === "/forgot-password"
+        ? "/api/auth/password-reset/request"
+        : "/api/auth/verification/resend";
+      payload = { email: authEmail };
+    }
+
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result: { status?: string; emailPreviewAvailable?: boolean; error?: string } = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Unable to complete this request.");
+      setEmailPreviewAvailable(result.emailPreviewAvailable ?? false);
+      if (pathname === "/verify-email" && token) {
+        setAuthNotice("Email verified. You can now sign in.");
+        setNewAccountPassword("");
+        setAuthPasswordConfirm("");
+        navigate("/login");
+      } else if (pathname === "/reset-password") {
+        setAuthNotice("Password updated. Sign in with your new password.");
+        setNewAccountPassword("");
+        setAuthPasswordConfirm("");
+        navigate("/login");
+      } else {
+        setAuthNotice(pathname === "/forgot-password"
+          ? "If a verified account uses that address, a password-reset link is in the local demo inbox."
+          : "If that address belongs to an unverified account, a verification link is in the local demo inbox.");
+      }
+    } catch (flowError) {
+      console.error("SaikiScio email verification or recovery request failed.", flowError);
+      setAuthError(flowError instanceof Error ? flowError.message : "Unable to complete this request. Please try again.");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const loadDemoEmailPreview = async () => {
+    setDemoEmailError("");
+    try {
+      const response = await fetch("/api/dev/mail-preview");
+      const result: { messages?: DemoEmailMessage[]; error?: string } = await response.json();
+      if (!response.ok || !result.messages) throw new Error(result.error ?? "The local demo inbox is unavailable.");
+      setDemoEmails(result.messages);
+    } catch (previewError) {
+      console.error("Unable to load the local SaikiScio demo inbox.", previewError);
+      setDemoEmailError(previewError instanceof Error ? previewError.message : "The local demo inbox is unavailable.");
     }
   };
 
@@ -890,17 +1183,33 @@ function App() {
     }
   };
 
-  const legalPath = pathname === "/terms" || pathname === "/privacy" || pathname === "/cookies"
+  const legalPath = pathname === "/terms" || pathname === "/privacy" || pathname === "/cookies" || pathname === "/support"
     ? pathname as LegalPath
     : null;
-  const isAuthPage = pathname === "/login" || pathname === "/register";
+  const isAuthPage = [
+    "/login",
+    "/register",
+    "/verify-email",
+    "/forgot-password",
+    "/reset-password",
+    "/dev-mail",
+  ].includes(pathname);
   const isAccountPage = pathname === "/account";
   const authMode = pathname === "/register" ? "register" : "login";
-  const legalTitle = legalPath === "/terms" ? "Terms of use" : legalPath === "/privacy" ? "Privacy notice" : "Cookie & storage settings";
+  const emailFlowToken = new URLSearchParams(search).get("token");
+  const legalTitle = legalPath === "/terms" ? "Terms of use"
+    : legalPath === "/privacy" ? "Privacy notice"
+      : legalPath === "/cookies" ? "Cookie & storage settings"
+        : "Support";
+  const builtInLearningSkills = selectedSkills.filter((name) => Object.prototype.hasOwnProperty.call(skillGuides, name));
 
   useEffect(() => {
     if (isAccountPage && authInitialized && !currentUser) navigate("/login", { replace: true });
   }, [isAccountPage, authInitialized, currentUser, navigate]);
+
+  useEffect(() => {
+    if (pathname === "/dev-mail" && emailPreviewAvailable) void loadDemoEmailPreview();
+  }, [pathname, emailPreviewAvailable]);
 
   return (
     <div className="min-h-screen">
@@ -940,41 +1249,63 @@ function App() {
       </header>
 
       {legalPath && <main className="legal-page section-shell">
-        <div className="legal-page-top"><Link className="back-link" to="/"><Icon name="back" size={16} /> Back to SaikiScio</Link><span className="eyebrow">SAIKISCIO · UPDATED OCTOBER 8, 2026</span></div>
+        <div className="legal-page-top"><Link className="back-link" to="/"><Icon name="back" size={16} /> Back to SaikiScio</Link><span className="eyebrow">SAIKISCIO · LEGAL &amp; SUPPORT</span></div>
         <div className="legal-page-layout">
-          <aside className="legal-sidebar"><span className="eyebrow">YOUR INFORMATION</span><h1>Clear, thoughtful<br /><span className="serif-italic">ground rules.</span></h1><nav aria-label="Legal pages"><Link className={legalPath === "/terms" ? "active" : ""} to="/terms">Terms of use</Link><Link className={legalPath === "/privacy" ? "active" : ""} to="/privacy">Privacy notice</Link><Link className={legalPath === "/cookies" ? "active" : ""} to="/cookies">Cookies &amp; storage</Link></nav><p>We aim to explain what this learning demo does in plain language. Review these details before creating an account.</p></aside>
+          <aside className="legal-sidebar"><span className="eyebrow">YOUR INFORMATION</span><h1>Clear, thoughtful<br /><span className="serif-italic">ground rules.</span></h1><nav aria-label="Legal and support pages"><Link className={legalPath === "/terms" ? "active" : ""} to="/terms">Terms of use</Link><Link className={legalPath === "/privacy" ? "active" : ""} to="/privacy">Privacy notice</Link><Link className={legalPath === "/cookies" ? "active" : ""} to="/cookies">Cookies &amp; storage</Link><Link className={legalPath === "/support" ? "active" : ""} to="/support">Support</Link></nav><p>These pages explain how SaikiScio works and how to manage your information.</p></aside>
           <article className="legal-document">
             <h1>{legalTitle}</h1>
             {legalPath === "/terms" && <div className="legal-copy">
-              <p className="legal-lead">These terms explain how to use SaikiScio, a self-guided skill-practice website. By using the service, you agree to these terms.</p>
-              <h2>1. Who may use SaikiScio</h2><p>You must be able to form a binding agreement under the laws where you live. If you are under the age of majority, use the service only with a parent or guardian's permission. Do not create an account for someone else without their permission.</p>
-              <h2>2. Your account and password</h2><p>Provide a valid email address, keep your password confidential, and use a unique password. You are responsible for activity under your account and for telling the site operator if you suspect unauthorized access. There is no email-based password recovery in this prototype; do not use a password you cannot afford to lose.</p>
-              <h2>3. Learning content and appropriate use</h2><p>SaikiScio provides general educational prompts, examples, and practice activities. They are not professional, clinical, legal, financial, or employment advice and do not guarantee a particular result. Use your own judgment, adapt activities to your circumstances, and stop if an exercise is uncomfortable or unsafe.</p><p>Do not use the service unlawfully, interfere with its operation, probe or bypass security, upload malicious content, or attempt to access another person's account or information.</p>
-              <h2>4. Your content and saved progress</h2><p>You retain responsibility for the goals, notes, and other information you submit. You give SaikiScio permission to store and process that information only to provide account, progress-saving, and learning-plan features. Avoid entering highly sensitive personal information. You may clear learning progress or request account deletion using the account controls; account deletion removes the account and associated saved progress.</p>
-              <h2>5. Availability and changes</h2><p>This prototype may change, be interrupted, or be discontinued. Keep a copy of anything important to you. Features that depend on the local development server or database are not a hosted backup service.</p>
-              <h2>6. Disclaimers and liability</h2><p>To the extent permitted by law, the service is provided “as is” without guarantees that it will always be available, error-free, or suitable for a particular purpose. Nothing in these terms limits rights or remedies that cannot legally be limited in your jurisdiction.</p>
-              <h2>7. Contact and governing terms</h2><p>The publisher must add a real support contact, legal entity, governing-law details, and any jurisdiction-specific provisions before public launch. These draft terms are not legal advice and are not ready to establish a production service agreement.</p>
-              <p className="legal-draft-note">Publisher review required: complete the contact and jurisdiction information and have these draft terms reviewed for the intended audience before public deployment.</p>
+              <p className="legal-lead">These terms explain how to use SaikiScio, an educational skill-practice website independently operated by its creator in the Philippines. The site is available to learners in the Philippines and other countries.</p>
+              <h2>1. Who may use SaikiScio</h2><p>SaikiScio is an educational site for learners of any age. Children should use the site with a parent or guardian's guidance and permission, and a parent or guardian should supervise any account creation and information submitted. Do not create an account for someone else without their permission.</p>
+              <h2>2. Your account and password</h2><p>Provide an email address you can access, keep your password confidential, and use a unique password. Production accounts can be created and used without email verification; no verification or password-recovery email is sent. Password recovery is unavailable in the current deployment, so keep your password safe. The local portfolio demo previews one-time verification and recovery links without sending email. You are responsible for activity under your account and should contact support if you suspect unauthorized access.</p>
+              <h2>3. Learning content and appropriate use</h2><p>SaikiScio provides general educational prompts, examples, and practice activities. When configured, Google AI Studio may generate learning roadmaps from the skill, explanation, and weekly availability you submit. AI-generated content can be inaccurate or incomplete; review it and use your own judgment. The content is not professional, clinical, legal, financial, or employment advice and does not guarantee a particular result. Adapt activities to your circumstances, and stop if an exercise is uncomfortable or unsafe.</p><p>Do not use the service unlawfully, interfere with its operation, probe or bypass security, upload malicious content, or attempt to access another person's account or information.</p>
+              <h2>4. Your content and saved progress</h2><p>You remain responsible for the goals, notes, and other information you submit. You authorize SaikiScio to store and process that information to provide and maintain account, progress-saving, and learning-plan features, as described in the Privacy notice. Avoid entering passwords, financial information, health information, or other sensitive personal data in learning prompts. You may clear this browser's copy or delete your account and associated account progress using the account controls. Clearing browser data alone does not delete server-side account data.</p>
+              <h2>5. Ownership and permission to use the service</h2><p>SaikiScio's name, design, software, and original learning materials are owned by their respective rights holders. Subject to these terms, you may use the website for personal, non-commercial learning. Do not copy, redistribute, or commercially exploit site materials except where applicable law permits or the rights holder gives permission. AI-generated material may not be unique and should be independently reviewed.</p>
+              <h2>6. Availability and changes</h2><p>Features may change, be interrupted, or be discontinued. No backup or uninterrupted availability is promised. Keep a separate copy of information important to you. These terms may change as the service changes. Notice or consent will be provided for material changes where required by law.</p>
+              <h2>7. Disclaimers and liability</h2><p>To the extent permitted by law, the service is provided “as is” without guarantees that it will always be available, error-free, or suitable for a particular purpose. Nothing in these terms limits rights or remedies that cannot legally be limited in your jurisdiction.</p>
+              <h2>8. Contact and governing law</h2><p>SaikiScio is independently operated by its creator in the Philippines. For support or questions about these terms, email <a href="mailto:gabbyconlu@gmail.com">gabbyconlu@gmail.com</a>. Philippine law governs these terms, subject to consumer protections and other rights that cannot be excluded under the laws that apply to you.</p>
             </div>}
             {legalPath === "/privacy" && <div className="legal-copy">
-              <p className="legal-lead">This notice describes what SaikiScio collects, why it is used, and the controls available to you. It applies to the current account-enabled prototype.</p>
-              <h2>1. Information we process</h2><p><strong>Account information:</strong> your normalized email address, a securely hashed password, account timestamps, and hashed session tokens.</p><p><strong>Learning information:</strong> selected skills, goal text, confidence ratings, learning format preferences, weekly time, optional target date, lesson notes, checklist states, and completion progress.</p><p><strong>Technical information:</strong> session cookie and basic request information needed to operate the local Node API and prevent abuse. The prototype does not intentionally collect analytics or advertising identifiers.</p>
-              <h2>2. How information is used</h2><p>We use account details to register and authenticate you, learning data to build and save a plan, session data to keep you signed in, and limited request information to protect and troubleshoot the service. The current plan generator uses local rules; it does not send your answers to an AI provider.</p>
-              <h2>3. Storage, security, and sharing</h2><p>For local development, account and learning records are stored in PostgreSQL on the computer running the API. The browser also keeps a local copy of learning progress and cookie preferences. Passwords are hashed with scrypt; session identifiers are random, stored hashed in the database, and delivered in an HttpOnly, SameSite cookie. These controls reduce risk but do not make a development environment production-ready.</p><p>There is no analytics, advertising, or third-party AI integration in this version. The database/API operator can access records on the host computer. Do not expose this unauthenticated-development deployment to the public internet.</p>
-              <h2>4. Retention and your controls</h2><p>Account data remains in PostgreSQL until you delete your account or the database operator removes it. Use Account → Delete account to delete the account and associated saved progress. Sign out to invalidate your current session. Clearing browser storage removes this browser's local copy but does not delete the account's database record.</p>
-              <h2>5. Your choices and rights</h2><p>Depending on where you live, you may have rights to access, correct, delete, restrict, or receive a copy of personal information. This prototype has no automated export or formal request workflow. A production operator must provide a contact and process for requests and explain any applicable legal basis and retention limits.</p>
-              <h2>6. Children, international use, and changes</h2><p>This prototype is not designed to collect information from children. It has no configured production data region, processor contracts, or international transfer mechanism. The operator should assess these matters and update this notice before public use. We may update this notice when the service changes.</p>
-              <p className="legal-draft-note">Publisher review required: add the responsible organization and privacy contact, verify server logging and hosting practices, retention periods, data region, age policy, and legally required disclosures before launch.</p>
+              <p className="legal-lead">This notice explains what personal information SaikiScio processes, why it is used, and the controls available to you. SaikiScio is independently operated by its creator in the Philippines and is available to learners in the Philippines and other countries.</p>
+              <h2>1. Information processed</h2><p><strong>Account information:</strong> email address, a password hash (not the original password), email-verification status, account timestamps, and hashes of sign-in and one-time verification/recovery tokens.</p><p><strong>Learning information:</strong> selected skills, goal and explanation text, confidence ratings, learning-format preferences, weekly availability, optional target date, roadmap, lesson notes, checklist states, and completion progress.</p><p><strong>Browser-stored information:</strong> learning progress is stored in local storage on this device. This is browser storage, not a cookie, and it may remain after you close the browser until you clear it.</p><p><strong>Technical information:</strong> the essential sign-in cookie and technical request information processed by the hosting and database providers to deliver, secure, and troubleshoot the service. The local portfolio demo keeps temporary email-preview links in API memory; it does not send email. The current app has no analytics or advertising integration.</p>
+              <h2>2. Purposes and AI processing</h2><p>Account data is used to register and authenticate you; learning information is used to create, display, and save your learning plan; and technical information is used to operate and protect the service. If you request an AI roadmap, your target skill, explanation, and weekly availability are sent from the server to Google AI Studio. Do not put passwords or sensitive personal information in a prompt. Google's handling of submitted information is governed by its applicable terms and data policies.</p>
+              <h2>3. Hosting, storage, and service providers</h2><p>The live website and API are hosted through Vercel. Account records and saved progress are stored in a hosted PostgreSQL database connected to the project; the database provider and its storage region are not known to the project operator. Google AI Studio processes roadmap requests when that feature is used. The website also requests fonts from Google Fonts, which may receive technical connection information such as your IP address and browser details. These providers process information under their own terms and privacy practices; their processing or storage may take place outside the Philippines.</p><p>Passwords are hashed using scrypt. Session tokens are randomly generated, stored as hashes in PostgreSQL, and sent in an HttpOnly, SameSite=Strict cookie that is Secure in production. Production accounts can be registered and used without email verification. Email is not sent by the current deployment, so email-based password recovery is unavailable. The local portfolio demo can preview temporary verification and recovery links in memory.</p>
+              <h2>4. Retention and deletion</h2><p>Account and learning records are kept until you delete your account. When you request account deletion using Account → Delete account, the account and associated saved learning in the application database are deleted within seven days. Sign out invalidates your session. Clearing local browser data removes only that device's copy and does not delete the account copy. Backup copies and operational or security logs may remain for periods controlled by the hosting, database, or other service providers; their retention periods are not known to the project operator.</p>
+              <h2>5. Your choices and privacy requests</h2><p>You can review or change learning information in the app, clear this device's saved learning, sign out, or delete your account. Depending on where you live, you may have additional rights to access, correct, delete, restrict, or receive a copy of personal information, or to complain to a regulator. For support or a privacy request, email <a href="mailto:gabbyconlu@gmail.com">gabbyconlu@gmail.com</a>.</p>
+              <h2>6. Children, international use, and updates</h2><p>SaikiScio is an educational site for learners of any age and is available in the Philippines and other countries. Children should use the site with a parent or guardian's guidance and permission. Parents or guardians should supervise a child's account and information submitted. Privacy rights and requirements differ by location. If the service's data practices change, this notice will be updated.</p>
             </div>}
             {legalPath === "/cookies" && <div className="legal-copy">
-              <p className="legal-lead">Manage browser storage and sign-in cookies. Essential storage is needed to keep your account signed in and remember your learning.</p>
-              <h2>Essential account session</h2><p>When you sign in, SaikiScio sets a random, HttpOnly, SameSite session cookie. The cookie is used only to authenticate requests to your account. It expires after seven days or when you sign out. It is required for sign-in and cannot be disabled while using an account.</p>
-              <h2>Learning storage</h2><p>Learning progress and your preferences are stored in this browser. When signed in, progress is also stored in the SaikiScio PostgreSQL database. Clearing browser storage removes the local copy, but not account data saved in the database.</p>
-              <h2>Optional analytics</h2><p>No analytics or advertising tools are installed. Your analytics choice below is remembered, but turning it on will not enable tracking unless an analytics service is added in a future version.</p>
-              <label className="preference-row preference-toggle legal-preference"><span><strong>Optional analytics preference</strong><small>Save your choice on this browser. Analytics are not currently active.</small></span><input type="checkbox" checked={cookiePreferences.analytics} onChange={(event) => setCookiePreferences({ analytics: event.target.checked })} /></label>
-              <p className="cookie-save-message" role="status">Your preference is saved automatically on this device.</p>
-              <h2>Clear this browser's saved learning</h2><p>Use the clear-progress control on your plan to remove local learning progress and, while signed in, its account copy. To only clear this browser's copy, use your browser's site-data settings; that does not delete your account.</p>
-              <p className="legal-draft-note">This page describes the current prototype. Hosting providers may process technical logs. Review actual deployment behavior and local cookie laws before public launch.</p>
+              <p className="legal-lead">SaikiScio currently uses one essential sign-in cookie and browser local storage for learning progress. The app does not currently include analytics or marketing tools, or set analytics, advertising, or preference cookies. Hosting and service providers may process technical request data as described in the Privacy notice.</p>
+              <h2>Essential sign-in cookie</h2><p><strong>Name:</strong> <code>saikiscio_session</code>. <strong>Purpose:</strong> authenticate your account requests and keep you signed in. <strong>Duration:</strong> up to seven days, or until you sign out. It is HttpOnly and SameSite=Strict; it is marked Secure in production. It is necessary for account sign-in and cannot be switched off while signed in. Use the sign-out control to end the session and remove this cookie.</p>
+              {currentUser && <button className="button-quiet cookie-signout" type="button" onClick={() => void signOut()}>Sign out and clear this session</button>}
+              <h2>Learning data in this browser</h2><p>SaikiScio saves your check-in answers, roadmap, practice notes, and progress in this browser's local storage so you can return to them. This is not a cookie. If you are signed in, a copy is also saved to the configured PostgreSQL account database. Clearing this browser's copy does not delete the account copy.</p>
+              <button className="button-quiet cookie-clear" type="button" onClick={() => {
+                clearLearningState();
+                setPage("home");
+                setCookieNotice("This browser's saved learning was cleared. If you have an account, its separate saved copy remains.");
+              }}>Clear this browser's saved learning</button>
+              {cookieNotice && <p className="cookie-save-message" role="status">{cookieNotice}</p>}
+              <h2>Other cookies and third-party requests</h2><p>No analytics or advertising cookies are set by the current app. Google Fonts is requested to display the site's typography and may receive technical connection information; this page does not treat that request as a cookie preference. AI roadmap requests send the skill, explanation, and weekly time to Google AI Studio as described in the Privacy notice. If analytics, advertising, or marketing tools are added later, this notice and any required consent controls should be reviewed and updated before those tools are enabled.</p>
+              <p>For help with these settings, email <a href="mailto:gabbyconlu@gmail.com">gabbyconlu@gmail.com</a>.</p>
+            </div>}
+            {legalPath === "/support" && <div className="legal-copy support-copy">
+              <p className="legal-updated">SaikiScio support</p>
+              <p className="legal-lead">For questions or help with SaikiScio, contact the project by email. No response time is promised.</p>
+              <h2>Email support</h2>
+              <p><a className="support-email-link" href="mailto:gabbyconlu@gmail.com">gabbyconlu@gmail.com</a></p>
+              <div className="support-actions">
+                <a className="button-primary support-email-button" href="mailto:gabbyconlu@gmail.com">Open your email app</a>
+                <button className="button-quiet cookie-clear" type="button" onClick={() => {
+                  void navigator.clipboard.writeText("gabbyconlu@gmail.com").then(() => {
+                    setSupportNotice("Support email copied to your clipboard.");
+                  }).catch((copyError: unknown) => {
+                    console.error("Unable to copy the SaikiScio support email.", copyError);
+                    setSupportNotice("Could not copy automatically. Select and copy the email address above.");
+                  });
+                }}>Copy email address</button>
+              </div>
+              {supportNotice && <p className="cookie-save-message" role="status">{supportNotice}</p>}
+              <p>When asking for help, describe what you were doing and include any error message. Do not email passwords, verification links, reset links, API keys, or other secrets.</p>
             </div>}
           </article>
         </div>
@@ -982,29 +1313,84 @@ function App() {
 
       {isAuthPage && <main className="auth-page section-shell">
         <Link className="back-link" to="/"><Icon name="back" size={16} /> Back to SaikiScio</Link>
-        <div className="auth-card">
-          <span className="eyebrow">{authMode === "register" ? "A LITTLE ROOM TO GROW" : "WELCOME BACK"}</span>
-          <h1>{authMode === "register" ? <>Make your<br /><span className="serif-italic">account.</span></> : <>Pick up where<br /><span className="serif-italic">you left off.</span></>}</h1>
-          <p>{authMode === "register" ? "Create an account to keep your learning plan and notes with you when you return." : "Sign in to return to your saved skills, plan, and learning notes."}</p>
-          {!authInitialized && <p className="auth-loading">Checking your sign-in…</p>}
-          <form className="auth-form" onSubmit={(event) => void submitAuth(event)}>
+        {pathname === "/dev-mail" && emailPreviewAvailable ? <div className="auth-card demo-mail-card">
+          <span className="eyebrow">LOCAL PORTFOLIO DEMO</span>
+          <h1>Demo <span className="serif-italic">inbox.</span></h1>
+          <p>This local-only inbox previews verification and password-reset links. It does not send email. Messages are temporary and disappear when the API server restarts.</p>
+          <button className="button-quiet" type="button" onClick={() => void loadDemoEmailPreview()}>Refresh inbox</button>
+          {demoEmailError && <p className="form-error" role="alert">{demoEmailError} This inbox is only available while running the local API.</p>}
+          {!demoEmailError && demoEmails.length === 0 && <p className="auth-loading">No demo emails yet. Create an account or request a password reset to preview a link here.</p>}
+          <div className="demo-mail-list">{demoEmails.map((message) => <article className="demo-mail-item" key={message.id}>
+            <span className="eyebrow">{message.purpose === "verify-email" ? "EMAIL VERIFICATION" : "PASSWORD RESET"}</span>
+            <h2>{message.subject}</h2>
+            <p>To: {message.to}</p>
+            <Link className="button-primary" to={message.link}>Open demo link <Icon name="arrow" size={15} /></Link>
+            <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleString()}</time>
+          </article>)}</div>
+          <p className="auth-privacy-note">Demo links contain one-time tokens. Do not expose this local inbox on a public deployment.</p>
+        </div> : pathname === "/dev-mail" ? <div className="auth-card">
+          <span className="eyebrow">ACCOUNT HELP</span><h1>Email <span className="serif-italic">unavailable.</span></h1>
+          <p>This deployment does not send email, so its local demo inbox is not available.</p>
+          <p className="auth-switch"><Link to="/support">Contact support</Link> · <Link to="/login">Back to sign in</Link></p>
+        </div> : <div className="auth-card">
+          <span className="eyebrow">{pathname === "/register" ? "A LITTLE ROOM TO GROW" : pathname === "/login" ? "WELCOME BACK" : "ACCOUNT HELP"}</span>
+          <h1>{pathname === "/register" ? <>Make your<br /><span className="serif-italic">account.</span></>
+            : pathname === "/login" ? <>Pick up where<br /><span className="serif-italic">you left off.</span></>
+              : pathname === "/verify-email" ? <>Verify your<br /><span className="serif-italic">email.</span></>
+                : pathname === "/forgot-password" ? <>Find your<br /><span className="serif-italic">way back.</span></>
+                  : <>Choose a new<br /><span className="serif-italic">password.</span></>}</h1>
+          <p>{pathname === "/register" ? "Create an account to keep your learning plan and notes with you when you return."
+            : pathname === "/login" ? "Sign in to return to your saved skills, plan, and learning notes."
+              : pathname === "/verify-email" ? emailFlowToken ? "Confirm that you own this email address before signing in." : "Enter the address you registered with to create another verification link."
+                : pathname === "/forgot-password" ? "Enter your account email to request a password-reset link."
+                  : "Choose a new password for your SaikiScio account."}</p>
+          {pathname === "/login" && !authInitialized && <p className="auth-loading">Checking your sign-in…</p>}
+          {authError && <p className="form-error" role="alert">{authError}</p>}
+          {authNotice && <p className="auth-success" role="status">{authNotice}</p>}
+          {authNotice && emailPreviewAvailable && <p className="demo-inbox-link"><Link to="/dev-mail">Open the local demo inbox <Icon name="arrow" size={14} /></Link></p>}
+
+          {(pathname === "/login" || pathname === "/register") && <form className="auth-form" onSubmit={(event) => void submitAuth(event)}>
             <label htmlFor="auth-email">Email address</label><input id="auth-email" type="email" autoComplete="email" maxLength={254} required value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="you@example.com" />
             <label htmlFor="auth-password">Password</label><input id="auth-password" type="password" autoComplete={authMode === "register" ? "new-password" : "current-password"} minLength={6} maxLength={128} required value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} placeholder="At least 6 characters" />
             {authMode === "register" && <><label htmlFor="auth-password-confirm">Confirm password</label><input id="auth-password-confirm" type="password" autoComplete="new-password" minLength={6} maxLength={128} required value={authPasswordConfirm} onChange={(event) => setAuthPasswordConfirm(event.target.value)} placeholder="Type your password again" /><div className="terms-consent"><input id="terms-consent" aria-label="I agree to the Terms of use and have read the Privacy notice" type="checkbox" checked={termsAccepted} onChange={(event) => setTermsAccepted(event.target.checked)} required /><div><label htmlFor="terms-consent">I agree to the</label> <Link to="/terms">Terms of use</Link> <span>and have read the</span> <Link to="/privacy">Privacy notice</Link>.</div></div></>}
-            <span className="password-guidance">Use 6 or more characters. This local prototype cannot send password-reset emails.</span>
-            {authError && <p className="form-error" role="alert">{authError}</p>}
-            {authNotice && <p className="auth-success" role="status">{authNotice}</p>}
-            <button className="button-primary auth-submit" disabled={authBusy || !authInitialized}>{authBusy ? "Please wait…" : authMode === "register" ? "Create account" : "Sign in"} <Icon name="arrow" size={16} /></button>
-          </form>
-          <p className="auth-switch">{authMode === "register" ? "Already have an account?" : "New to SaikiScio?"} <Link to={authMode === "register" ? "/login" : "/register"}>{authMode === "register" ? "Sign in" : "Create an account"}</Link></p>
-          <p className="auth-privacy-note">By continuing, you agree to our <Link to="/terms">Terms</Link> and acknowledge the <Link to="/privacy">Privacy notice</Link>.</p>
-        </div>
+            {authMode === "register" && <span className="password-guidance">{emailPreviewAvailable
+              ? "Use 6 or more characters. Verification links appear in a local-only demo inbox; no email is sent."
+              : "Use 6 or more characters. No verification email or password recovery is available in this deployment; use an email you can access and keep your password safe."}</span>}
+            <button className="button-primary auth-submit" disabled={authBusy || (pathname === "/login" && !authInitialized)}>{authBusy ? "Please wait…" : authMode === "register" ? "Create account" : "Sign in"} <Icon name="arrow" size={16} /></button>
+          </form>}
+
+          {(pathname === "/verify-email" || pathname === "/forgot-password" || pathname === "/reset-password") && !emailFlowsAvailable && <div className="auth-unavailable" role="status">
+            <p>Email verification and password recovery are not configured for this deployment. You can create and use an account, but a forgotten password cannot currently be reset.</p>
+            <p><Link to="/support">Contact support</Link> or <Link to="/login">return to sign in</Link>.</p>
+          </div>}
+
+          {pathname === "/verify-email" && emailFlowsAvailable && <form className="auth-form" onSubmit={(event) => void submitEmailFlow(event)}>
+            {!emailFlowToken && <><label htmlFor="auth-email">Email address</label><input id="auth-email" type="email" autoComplete="email" maxLength={254} required value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="you@example.com" /></>}
+            <button className="button-primary auth-submit" disabled={authBusy}>{authBusy ? "Please wait…" : emailFlowToken ? "Verify email" : "Create verification link"} <Icon name="arrow" size={16} /></button>
+          </form>}
+
+          {pathname === "/forgot-password" && emailFlowsAvailable && <form className="auth-form" onSubmit={(event) => void submitEmailFlow(event)}>
+            <label htmlFor="auth-email">Email address</label><input id="auth-email" type="email" autoComplete="email" maxLength={254} required value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="you@example.com" />
+            <button className="button-primary auth-submit" disabled={authBusy}>{authBusy ? "Please wait…" : "Create reset link"} <Icon name="arrow" size={16} /></button>
+          </form>}
+
+          {pathname === "/reset-password" && emailFlowsAvailable && <form className="auth-form" onSubmit={(event) => void submitEmailFlow(event)}>
+            <label htmlFor="reset-password">New password</label><input id="reset-password" type="password" autoComplete="new-password" minLength={6} maxLength={128} required value={newAccountPassword} onChange={(event) => setNewAccountPassword(event.target.value)} placeholder="At least 6 characters" />
+            <label htmlFor="reset-password-confirm">Confirm new password</label><input id="reset-password-confirm" type="password" autoComplete="new-password" minLength={6} maxLength={128} required value={authPasswordConfirm} onChange={(event) => setAuthPasswordConfirm(event.target.value)} placeholder="Type your password again" />
+            <button className="button-primary auth-submit" disabled={authBusy || !emailFlowToken}>{authBusy ? "Please wait…" : "Save new password"} <Icon name="arrow" size={16} /></button>
+          </form>}
+
+          {pathname !== "/register" && pathname !== "/login" && <p className="auth-switch"><Link to="/login">Back to sign in</Link></p>}
+          {pathname === "/login" && <p className="auth-switch">New to SaikiScio? <Link to="/register">Create an account</Link></p>}
+          {pathname === "/register" && <p className="auth-switch">Already have an account? <Link to="/login">Sign in</Link></p>}
+          {(pathname === "/login" || pathname === "/register") && <p className="auth-privacy-note">By continuing, you agree to our <Link to="/terms">Terms</Link> and acknowledge the <Link to="/privacy">Privacy notice</Link>.</p>}
+        </div>}
       </main>}
 
       {isAccountPage && currentUser && <main className="account-page section-shell">
         <Link className="back-link" to="/"><Icon name="back" size={16} /> Back to learning</Link>
         <div className="account-heading"><span className="eyebrow">YOUR SAIkISCIO ACCOUNT</span><h1>Account <span className="serif-italic">settings.</span></h1><p>Manage your sign-in and the learning data saved to your account.</p></div>
-        <section className="account-card"><span className="eyebrow">ACCOUNT EMAIL</span><h2>{currentUser.email}</h2><p>Your email is used to sign in. Email changes and email verification are not available in this prototype.</p></section>
+        <section className="account-card"><span className="eyebrow">ACCOUNT EMAIL</span><h2>{currentUser.email}</h2><p>Your email is used to sign in. Email verification and password recovery are not configured in the deployed portfolio version; keep your password safe.</p></section>
         <section className="account-card"><span className="eyebrow">PASSWORD &amp; SECURITY</span><h2>Change your password</h2><p>Choose a unique password with at least 6 characters. Changing it signs out any other active sessions.</p><form className="account-form" onSubmit={(event) => void changePassword(event)}><label htmlFor="current-password">Current password</label><input id="current-password" type="password" autoComplete="current-password" required value={accountPassword} onChange={(event) => setAccountPassword(event.target.value)} /><label htmlFor="new-password">New password</label><input id="new-password" type="password" autoComplete="new-password" minLength={6} maxLength={128} required value={newAccountPassword} onChange={(event) => setNewAccountPassword(event.target.value)} /><button className="button-primary">Update password <Icon name="check" size={15} /></button></form></section>
         <section className="account-card account-danger"><span className="eyebrow">PERMANENT ACTION</span><h2>Delete your account</h2><p>This permanently deletes your account, sign-in sessions, and saved learning progress from the SaikiScio database. Browser copies on your devices must be cleared separately.</p><button className="button-danger" onClick={() => void deleteAccount()}>Delete my account</button></section>
         {accountMessage && <p className="account-message" role="status">{accountMessage}</p>}
@@ -1159,9 +1545,15 @@ function App() {
                       </button>
                     ))}
                   </div>
+                  <label className="field-label" htmlFor="custom-skill">Or enter any skill you want to learn</label>
+                  <div className="custom-skill-entry">
+                    <input id="custom-skill" value={customSkillDraft} maxLength={180} onChange={(event) => setCustomSkillDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addCustomSkill(); } }} placeholder="For example: guitar, pottery, or Python" />
+                    <button type="button" className="button-quiet" onClick={addCustomSkill}>Use this skill</button>
+                  </div>
+                  {selectedSkills.some((name) => !Object.prototype.hasOwnProperty.call(skillGuides, name)) && <p className="custom-skill-selected">Your roadmap will focus on: <strong>{selectedSkills.join(", ")}</strong></p>}
                   <label className="field-label" htmlFor="goal">What would you love to do with this skill?</label>
-                  <textarea id="goal" value={goal} onChange={(event) => { setGoal(event.target.value); setError(""); }} placeholder="For example: feel more at ease speaking up in meetings…" rows={3} maxLength={240} />
-                  <div className="field-footer"><span>It can be a big dream or a small everyday thing.</span><span>{goal.length}/240</span></div>
+                  <textarea id="goal" value={goal} onChange={(event) => { setGoal(event.target.value); setError(""); }} placeholder="Tell us what you can do now, what you want to achieve, and any challenges or context that could shape your practice…" rows={4} maxLength={1200} />
+                  <div className="field-footer"><span>A few specific details help your coach make a more useful roadmap. You can leave this blank.</span><span>{goal.length}/1200</span></div>
                 </div>
               )}
               {step === 1 && (
@@ -1207,7 +1599,7 @@ function App() {
               {error && <p className="form-error" role="alert">{error}</p>}
               <div className="assessment-actions">
                 {step > 0 ? <button className="button-quiet" onClick={() => { setStep((current) => current - 1); setError(""); }}><Icon name="back" size={15} /> Go back</button> : <span className="privacy-note"><Icon name="leaf" size={14} /> Just for you, no pressure.</span>}
-                <button className="button-primary" onClick={continueAssessment}>{step === 2 ? "Make my plan" : "Keep going"} <Icon name="arrow" size={16} /></button>
+                <button className="button-primary" onClick={() => void continueAssessment()} disabled={roadmapBusy}>{roadmapBusy ? "Creating your roadmap…" : step === 2 ? "Make my plan" : "Keep going"} {!roadmapBusy && <Icon name="arrow" size={16} />}</button>
               </div>
             </section>
           </div>
@@ -1222,6 +1614,98 @@ function App() {
             <div className="results-bloom"><div className="bloom-center"><Icon name="leaf" size={32} /></div><span className="bloom-petal petal-one" /><span className="bloom-petal petal-two" /><span className="bloom-petal petal-three" /><span className="bloom-petal petal-four" /><span className="bloom-petal petal-five" /><span className="bloom-label">GROWING<br />YOUR WAY</span></div>
           </section>
           <section className="plan-section">
+            {visibleRoadmap ? (
+              <div className="roadmap-sections">
+                <article className="roadmap-section">
+                  <span className="eyebrow">YOUR LEARNING ROADMAP</span>
+                  <h2>1. Summary &amp; Focus Area</h2>
+                  <p className="roadmap-summary">{visibleRoadmap.summary}</p>
+                </article>
+                <article className="roadmap-section">
+                  <h2>2. Core Action Items</h2>
+                  <ol className="roadmap-action-list">
+                    {visibleRoadmap.actionItems.map((item, index) => {
+                      const complete = completedTasks.includes(index);
+                      const practiceOpen = activeRoadmapPractice === index;
+                      const note = roadmapPracticeNotes[String(index)] ?? "";
+                      return <li className={complete ? "roadmap-action-complete" : ""} key={`${item.title}-${index}`}>
+                        <span className="roadmap-item-number">{complete ? <Icon name="check" size={14} /> : `0${index + 1}`}</span>
+                        <div className="roadmap-action-content">
+                          <h3>{item.title}</h3>
+                          <p>{item.instructions}</p>
+                          <button
+                            type="button"
+                            className="roadmap-practice-toggle"
+                            aria-expanded={practiceOpen}
+                            onClick={() => {
+                              setStarted(true);
+                              setActiveRoadmapPractice(practiceOpen ? null : index);
+                            }}
+                          >
+                            {practiceOpen ? "Close practice" : note ? "Continue practice" : "Practice this action"}
+                            <Icon name={practiceOpen ? "chevron" : "arrow"} size={14} />
+                          </button>
+                          {practiceOpen && <div className="roadmap-practice-panel">
+                            <span className="lesson-step-label">YOUR NEXT SMALL STEP</span>
+                            <p>{item.instructions}</p>
+                            <label className="field-label" htmlFor={`roadmap-note-${index}`}>What did you try, or what will you try next?</label>
+                            <textarea
+                              id={`roadmap-note-${index}`}
+                              value={note}
+                              maxLength={600}
+                              rows={3}
+                              placeholder="Write a quick reflection or jot down your next step…"
+                              onChange={(event) => setRoadmapPracticeNotes((current) => ({ ...current, [String(index)]: event.target.value }))}
+                            />
+                            <div className="roadmap-practice-footer">
+                              <span>{note.length}/600 · Saved with your learning</span>
+                              <button type="button" className={`task-toggle ${complete ? "done" : ""}`} onClick={() => { setStarted(true); toggleTask(index); }}>
+                                {complete ? <><Icon name="check" size={14} /> Tried — undo</> : <>I tried this action <Icon name="arrow" size={14} /></>}
+                              </button>
+                            </div>
+                          </div>}
+                        </div>
+                      </li>;
+                    })}
+                  </ol>
+                </article>
+                <article className="roadmap-section">
+                  <h2>3. Key Milestones</h2>
+                  <p className="roadmap-milestone-progress">{completedMilestones.length} of {visibleRoadmap.milestones.length} milestones reached</p>
+                  <ol className="roadmap-milestones">
+                    {visibleRoadmap.milestones.map((milestone, index) => {
+                      const complete = completedMilestones.includes(index);
+                      return <li className={complete ? "roadmap-milestone-complete" : ""} key={`${milestone.stage}-${index}`}>
+                        <span>{complete ? <Icon name="check" size={13} /> : `0${index + 1}`} · {milestone.stage}</span>
+                        <p>{milestone.measurableOutcome}</p>
+                        <button type="button" className="roadmap-milestone-toggle" aria-pressed={complete} onClick={() => toggleMilestone(index)}>
+                          {complete ? "Reached — undo" : "Mark as reached"}
+                        </button>
+                      </li>;
+                    })}
+                  </ol>
+                </article>
+                <article className="roadmap-section">
+                  <h2>4. Recommended Practice Routine</h2>
+                  <p className="roadmap-frequency">{visibleRoadmap.practiceRoutine.frequency} · {visibleRoadmap.practiceRoutine.sessionsPerWeek} sessions × {visibleRoadmap.practiceRoutine.totalMinutes} minutes ({visibleRoadmap.practiceRoutine.sessionsPerWeek * visibleRoadmap.practiceRoutine.totalMinutes} minutes per week)</p>
+                  <ol className="roadmap-routine">
+                    {visibleRoadmap.practiceRoutine.segments.map((segment, index) => <li key={`${segment.activity}-${index}`}><span>{segment.minutes} min</span><div><h3>{segment.activity}</h3><p>{segment.instructions}</p></div></li>)}
+                  </ol>
+                </article>
+                <div className="roadmap-bottom">
+                  {!started
+                    ? <button className="button-primary" onClick={() => setStarted(true)}>Start my roadmap <Icon name="arrow" size={16} /></button>
+                    : <><div className="plan-progress"><strong>{completedTasks.length} of {visibleRoadmap.actionItems.length} actions complete</strong><div className="plan-progress-track"><span style={{ width: `${(completedTasks.length / visibleRoadmap.actionItems.length) * 100}%` }} /></div></div><span className="started-message"><Icon name="check" size={16} /> Your roadmap is underway</span></>}
+                  {!currentUser && <Link className="button-quiet" to="/register">Create an account to save across devices <Icon name="arrow" size={14} /></Link>}
+                </div>
+                <p className="roadmap-ai-note">AI-generated learning guidance can make mistakes. Review suggestions and adapt them to your circumstances.</p>
+              </div>
+            ) : (
+              <>
+            {generatedRoadmap && !roadmapError && <div className="roadmap-error" role="status"><div><strong>This roadmap does not match your current answers.</strong><p>The saved roadmap may be from an earlier check-in or unrelated request. Generate a fresh roadmap to match your current skill and goal.</p></div><button className="button-quiet" onClick={() => void generatePersonalizedRoadmap()} disabled={roadmapBusy}>{roadmapBusy ? "Creating roadmap…" : "Generate updated roadmap"}</button></div>}
+            {roadmapError && builtInLearningSkills.length > 0 && <div className="roadmap-error" role="alert"><div><strong>Your AI roadmap could not be generated.</strong><p>{roadmapError}</p></div><button className="button-quiet" onClick={() => void generatePersonalizedRoadmap()} disabled={roadmapBusy}>{roadmapBusy ? "Trying again…" : "Try again"}</button></div>}
+            {builtInLearningSkills.length === 0 && <div className="roadmap-unavailable"><div><h2>{roadmapError ? "Your custom-skill roadmap could not be generated" : "Your custom-skill roadmap isn't available yet"}</h2><p>{roadmapError || "Generate a domain-specific plan with Google AI Studio. If the API key is not configured, add GEMINI_API_KEY to the private .env file and restart the API."}</p></div><button className="button-quiet" onClick={() => void generatePersonalizedRoadmap()} disabled={roadmapBusy}>{roadmapBusy ? "Creating roadmap…" : roadmapError ? "Try again" : "Generate roadmap"}</button></div>}
+            {builtInLearningSkills.length > 0 && <>
             <div className="plan-heading"><div><span className="eyebrow">A plan shaped by your answers</span><h2>Your first few <span className="serif-italic">steps.</span></h2><p className="plan-personalization">Built around {selectedSkills.join(" + ")}, your goal, starting confidence, and the ways you like to learn.</p></div><span className="plan-duration"><Icon name="clock" size={15} /> A gentle 3-week start</span></div>
             {started && <div className="plan-progress"><div><strong>You’re on your way.</strong><span>{completedTasks.length} of {plan.length} steps complete</span></div><div className="plan-progress-track"><span style={{ width: `${(completedTasks.length / plan.length) * 100}%` }} /></div></div>}
             <div className="plan-steps">
@@ -1236,12 +1720,15 @@ function App() {
             </div>
             <div className="plan-bottom"><div className="method-note"><span className="method-note-icon"><Icon name="spark" size={18} /></span><div><strong>Made for how you learn</strong><p>{selectedMethods.join(" · ")}</p></div></div>{!started ? <button className="button-primary" onClick={() => setStarted(true)}>Start my plan <Icon name="arrow" size={16} /></button> : <span className="started-message"><Icon name="check" size={16} /> Your plan is underway</span>}</div>
             {!currentUser && <div className="account-save-callout"><div><strong>Want to pick this up on another device?</strong><span>Create an account to sync your learning plan and notes to PostgreSQL.</span></div><Link className="button-quiet" to="/register">Create free account <Icon name="arrow" size={14} /></Link></div>}
+            </>}
+              </>
+            )}
           </section>
-          <section className="learning-studio" aria-labelledby="learning-title">
+          {builtInLearningSkills.length > 0 && <section className="learning-studio" aria-labelledby="learning-title">
             <div className="learning-heading">
               <div><span className="eyebrow">Learn it by doing it</span><h2 id="learning-title">Your little <span className="serif-italic">learning studio.</span></h2><p>Choose a format, try a real exercise, and keep your notes here. Every lesson is ready to use—no sign-up or outside videos needed.</p></div>
               <div className="learning-skill-picker" role="group" aria-label="Choose a skill to practice">
-                {selectedSkills.map((name) => <button type="button" key={name} aria-pressed={activeLearningSkill === name} className={activeLearningSkill === name ? "chosen" : ""} onClick={() => { setActiveLearningSkill(name); setActiveLesson(null); }}>{name}</button>)}
+                {builtInLearningSkills.map((name) => <button type="button" key={name} aria-pressed={activeLearningSkill === name} className={activeLearningSkill === name ? "chosen" : ""} onClick={() => { setActiveLearningSkill(name); setActiveLesson(null); }}>{name}</button>)}
               </div>
             </div>
             <div className="learning-format-grid">
@@ -1273,13 +1760,13 @@ function App() {
               </article>;
             })()}
             <p className="learning-source-note">Original SaikiScio learning materials for practice. Video lessons are written, scene-by-scene walkthroughs rather than streamed videos.</p>
-          </section>
+          </section>}
           <div className="results-footer-note"><Icon name="leaf" size={16} /> Your path can change as you do. Come back and make it yours.</div>
           <div className="results-reset"><button className="text-link" onClick={startFresh}>Clear this saved learning and start over</button></div>
         </main>
       )}
 
-      <footer className="site-footer"><div className="footer-inner"><button className="brand footer-brand" onClick={() => { navigate("/"); setPage("home"); }} aria-label="SaikiScio home"><span className="brand-mark"><Icon name="leaf" size={17} /></span><span>Saiki<span className="brand-period">Scio</span></span></button><span>Make room to grow, one small step at a time.</span><nav className="legal-links" aria-label="Legal and privacy"><Link to="/terms">Terms</Link><Link to="/privacy">Privacy</Link><Link to="/cookies">Manage cookies</Link></nav></div></footer>
+      <footer className="site-footer"><div className="footer-inner"><button className="brand footer-brand" onClick={() => { navigate("/"); setPage("home"); }} aria-label="SaikiScio home"><span className="brand-mark"><Icon name="leaf" size={17} /></span><span>Saiki<span className="brand-period">Scio</span></span></button><span>Make room to grow, one small step at a time.</span><nav className="legal-links" aria-label="Legal and privacy"><Link to="/terms">Terms</Link><Link to="/privacy">Privacy</Link><Link to="/cookies">Manage cookies</Link><Link to="/support">Support</Link></nav></div></footer>
       </>}
     </div>
   );
