@@ -8,7 +8,7 @@
     }
   ],
   "functions": {
-    "api/roadmap/generate.mjs": {
+    "api/[...path].mjs": {
       "maxDuration": 60
     }
   }
