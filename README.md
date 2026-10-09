@@ -6,6 +6,7 @@ SaikiScio is a responsive skill-improvement website built with React, TypeScript
 
 - Warm, engaging landing page
 - Multi-step interactive assessment
+- One skill per roadmap, with separate saved plans learners can switch between without losing their answers or progress
 - Personalized three-week plan generated in the browser from selected skills, the learner's written goal, confidence ratings, preferred learning formats, and weekly time
 - Check-in answers, lesson notes, and activity progress saved in the current browser so learners can return later
 - PostgreSQL persistence through a local Node API in development or a Vercel Node.js function in deployment
@@ -14,6 +15,8 @@ SaikiScio is a responsive skill-improvement website built with React, TypeScript
 - Built-in short lessons, hands-on projects, reading, video-style walkthroughs, and guided practice for each skill
 - Dedicated Terms, Privacy, and Cookie & Storage pages
 - Optional AI-generated, domain-adaptive roadmaps through Google AI Studio (API key stays on the local server)
+- Interactive roadmaps with a next-step guide, combined progress tracking, saved action reflections, milestone check-ins, and a completable practice routine
+- Branching scenario challenges, weekly mini-quests that rotate by week and adapt to the selected skill, goal, confidence, and AI roadmap, plus saved reflections/history and explanatory lesson quizzes
 - Responsive design for desktop, tablet, and mobile
 - Accessible controls and clear user flow
 - Local browser storage remains available if PostgreSQL is not connected

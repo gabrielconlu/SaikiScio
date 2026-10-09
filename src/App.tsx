@@ -46,9 +46,12 @@ type RoadmapInputs = {
   weeklyHours: number;
 };
 
-type SavedProgress = {
+type WeeklyQuestRecord = { completed: string[]; notes: Record<string, string> };
+type ScenarioAnswer = { opening: number; followup: number | null };
+
+type SkillPlan = {
+  skill: string;
   step: number;
-  selectedSkills: string[];
   generatedRoadmap: GeneratedRoadmap | null;
   generatedRoadmapInputs: RoadmapInputs | null;
   goal: string;
@@ -61,15 +64,39 @@ type SavedProgress = {
   completedTasks: number[];
   roadmapPracticeNotes: Record<string, string>;
   completedMilestones: number[];
+  completedRoutineSegments: number[];
+  weeklyQuestHistory: Record<string, WeeklyQuestRecord>;
+};
+
+type SavedProgress = {
+  step: number;
+  selectedSkills: string[];
+  skillPlans: Record<string, SkillPlan>;
+  generatedRoadmap: GeneratedRoadmap | null;
+  generatedRoadmapInputs: RoadmapInputs | null;
+  goal: string;
+  confidence: Record<string, number>;
+  selectedMethods: LearningMethod[];
+  hours: number;
+  targetDate: string;
+  savedPage: JourneyPage;
+  started: boolean;
+  completedTasks: number[];
+  roadmapPracticeNotes: Record<string, string>;
+  completedMilestones: number[];
+  completedRoutineSegments: number[];
   activeLearningSkill: string;
   activeLesson: LearningMethod | null;
   completedActivities: string[];
   activityNotes: Record<string, string>;
   projectChecks: Record<string, boolean[]>;
   videoScenes: Record<string, number>;
+  skillChallengeAnswers: Record<string, ScenarioAnswer>;
+  quizAnswers: Record<string, Record<string, number>>;
 };
 
 const progressStorageKey = "saikiscio-progress-v1";
+const localApiUnavailableMessage = "The local account service is unreachable. Start both “npm run dev” (frontend and API proxy) and “npm run dev:api” (account API), then retry.";
 const skills: Skill[] = [
   { name: "Communication", category: "People", icon: "◌", tint: "peach", description: "Share ideas with clarity and confidence." },
   { name: "Problem solving", category: "Thinking", icon: "⌘", tint: "lilac", description: "Find a way forward when things get complex." },
@@ -139,6 +166,36 @@ const skillChallenges: Record<string, {
     goal: "learn new digital tools by trying small, safe, practical experiments",
   },
 };
+
+const scenarioBranches: {
+  setup: string;
+  choices: { label: string; insight: string }[];
+}[] = [
+  {
+    setup: "Your first move creates a useful opening. What would you do next to turn it into a small step forward?",
+    choices: [
+      { label: "Ask what would make the next step useful to the other person.", insight: "A small check-in keeps the next move relevant instead of assuming what someone needs." },
+      { label: "Agree on one action that can be tried soon.", insight: "A concrete, low-pressure action turns a good moment into practice you can learn from." },
+      { label: "Notice what helped, then try the approach again in another setting.", insight: "Reflecting on what worked helps you carry the skill into a new situation without expecting every moment to be identical." },
+    ],
+  },
+  {
+    setup: "The situation becomes less clear than you expected. How could you adjust without giving up on your first idea?",
+    choices: [
+      { label: "Pause and restate the main point in a simpler way.", insight: "A short reset can reduce confusion while keeping the useful idea intact." },
+      { label: "Ask one specific question about what feels unclear.", insight: "A focused question helps reveal the real obstacle instead of adding more guesses." },
+      { label: "Check which part is fact and which part is an assumption.", insight: "Separating evidence from assumptions gives you a steadier place to choose the next move." },
+    ],
+  },
+  {
+    setup: "Someone responds in an unexpected way. How could you stay curious and adapt your next move?",
+    choices: [
+      { label: "Listen, then summarize what you heard before replying.", insight: "A brief summary checks your understanding and shows the other person their response mattered." },
+      { label: "Connect what changed back to the shared goal.", insight: "Returning to the goal can help you adapt without losing sight of what the group is trying to accomplish." },
+      { label: "Choose one small experiment and see what it teaches you.", insight: "A reversible experiment makes uncertainty workable and gives you new evidence for the next attempt." },
+    ],
+  },
+];
 
 const skillGuides: Record<string, {
   principle: string;
@@ -350,6 +407,106 @@ function buildLearningPlan(
   });
 }
 
+type WeeklyQuest = { id: string; title: string; instructions: string; reflectionPrompt: string };
+type QuickQuizQuestion = { question: string; options: string[]; answerIndex: number; explanation: string };
+
+function buildQuickQuiz(skill: string): QuickQuizQuestion[] {
+  const guide = skillGuides[skill] ?? skillGuides.Communication;
+  return [
+    {
+      question: `Which idea is a useful starting point for ${skill.toLowerCase()}?`,
+      options: [guide.principle, "Wait until you feel completely ready before trying.", "Use one approach the same way in every situation."],
+      answerIndex: 0,
+      explanation: guide.principle,
+    },
+    {
+      question: "What is a good way to put the lesson into practice?",
+      options: ["Choose a high-stakes moment so you learn faster.", guide.challenge, "Avoid trying until you can predict the outcome."],
+      answerIndex: 1,
+      explanation: "A small, low-pressure attempt gives you useful experience without requiring a perfect result.",
+    },
+    {
+      question: "After trying, what can help you keep learning?",
+      options: ["Decide whether you are naturally good or bad at it.", "Move on without noticing what happened.", guide.reflection],
+      answerIndex: 2,
+      explanation: guide.reflection,
+    },
+  ];
+}
+
+function currentWeekKey(date = new Date()): string {
+  const monday = new Date(date);
+  monday.setHours(0, 0, 0, 0);
+  monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+  return `${monday.getFullYear()}-${String(monday.getMonth() + 1).padStart(2, "0")}-${String(monday.getDate()).padStart(2, "0")}`;
+}
+
+function formatWeekKey(weekKey: string): string {
+  const date = new Date(`${weekKey}T12:00:00`);
+  return Number.isNaN(date.getTime())
+    ? weekKey
+    : `Week of ${date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`;
+}
+
+function weekSequence(weekKey: string): number {
+  const date = Date.parse(`${weekKey}T00:00:00Z`);
+  return Number.isNaN(date) ? 0 : Math.floor((date - Date.UTC(1970, 0, 5)) / (7 * 24 * 60 * 60 * 1000));
+}
+
+function buildWeeklyQuests(skill: string, goal: string, confidenceLevel: number, roadmap: GeneratedRoadmap | null, weekKey: string): WeeklyQuest[] {
+  const guide = skillGuides[skill];
+  const sequence = Math.max(0, weekSequence(weekKey));
+  const phase = sequence % 4;
+  const action = roadmap?.actionItems[sequence % Math.max(roadmap.actionItems.length, 1)];
+  const routine = roadmap?.practiceRoutine.segments[sequence % Math.max(roadmap.practiceRoutine.segments.length, 1)];
+  const milestone = roadmap?.milestones[sequence % Math.max(roadmap.milestones.length, 1)];
+  const goalFocus = goal.trim()
+    ? ` Connect it to your goal: “${goal.trim()}”.`
+    : ` Choose one small situation where you could use ${skill.toLowerCase()}.`;
+  const comfortGuidance = confidenceLevel <= 1
+    ? " Keep it gentle: start by observing or rehearsing in a safe, low-pressure setting."
+    : confidenceLevel >= 3
+      ? " If it feels right, try a slightly more challenging situation and notice how you adapt."
+      : " Keep the first attempt small enough to fit into an ordinary day.";
+  const phaseNames = ["Spot it in real life", "Try a tiny experiment", "Use it toward your goal", "Reflect and level up"];
+  const fallbackPractice = guide
+    ? guide.practice[sequence % guide.practice.length]
+    : `Choose one small, low-risk practice related to ${skill.toLowerCase()} and note what happened.`;
+  const fallbackProject = guide
+    ? guide.project[sequence % guide.project.length]
+    : `Write down one useful idea about ${skill.toLowerCase()} that could help with your goal.`;
+  return [
+    {
+      id: `notice-${sequence}`,
+      title: phaseNames[phase],
+      instructions: phase === 0
+        ? `Notice one moment where ${skill.toLowerCase()} already shows up—or could help. What happened just before it?${goalFocus}`
+        : phase === 1
+          ? `Look for a moment that usually feels difficult and notice what makes it tricky before you act.${goalFocus}`
+          : phase === 2
+            ? `Notice one real situation connected to what you want to achieve, then name the skill that could move it forward.${goalFocus}`
+            : `Look back at a recent attempt. Notice one thing that felt easier, clearer, or more useful than before.${goalFocus}`,
+      reflectionPrompt: "What did you notice, and what might you try next?",
+    },
+    {
+      id: `practice-${sequence}`,
+      title: action ? `Roadmap practice: ${action.title}` : `Practice ${skill.toLowerCase()} in a small moment`,
+      instructions: action
+        ? `${action.instructions}${routine ? ` Try it with this routine: ${routine.activity} (${routine.minutes} minutes) — ${routine.instructions}` : ""}${goalFocus}`
+        : `${fallbackPractice} ${goalFocus}${comfortGuidance}`,
+      reflectionPrompt: "What did you actually try? What would you repeat or change?",
+    },
+    {
+      id: `reflect-${sequence}`,
+      title: milestone ? `Build toward: ${milestone.stage}` : phase === 3 ? "Celebrate one small improvement" : "Make the learning stick",
+      instructions: milestone
+        ? `${milestone.measurableOutcome}${goalFocus}`
+        : `${fallbackProject} Then explain in your own words what you learned and how it connects to your next step.${goalFocus}${comfortGuidance}`,
+      reflectionPrompt: milestone ? "What evidence shows you are moving toward this milestone?" : "What is one idea you want to remember for next week?",
+    },
+  ];
+}
+
 function parseSavedProgress(raw: string | null): SavedProgress | null {
   try {
     if (!raw) return null;
@@ -388,7 +545,7 @@ function parseSavedProgress(raw: string | null): SavedProgress | null {
     ) throw new Error("Saved progress has an unexpected format.");
     return {
       step: Math.min(2, Math.max(0, Math.floor(item.step))),
-      selectedSkills: item.selectedSkills.filter((skill): skill is string => typeof skill === "string" && skill.trim().length > 0 && skill.length <= 180).slice(0, 5),
+      selectedSkills: item.selectedSkills.filter((skill): skill is string => typeof skill === "string" && skill.trim().length > 0 && skill.length <= 180).slice(0, 1),
       generatedRoadmap,
       generatedRoadmapInputs,
       goal: item.goal,
@@ -405,17 +562,91 @@ function parseSavedProgress(raw: string | null): SavedProgress | null {
       completedMilestones: Array.isArray(item.completedMilestones)
         ? item.completedMilestones.filter((milestone): milestone is number => typeof milestone === "number" && Number.isInteger(milestone))
         : [],
+      completedRoutineSegments: Array.isArray(item.completedRoutineSegments)
+        ? item.completedRoutineSegments.filter((segment): segment is number => typeof segment === "number" && Number.isInteger(segment))
+        : [],
       activeLearningSkill: typeof item.activeLearningSkill === "string" && item.activeLearningSkill.length <= 180 ? item.activeLearningSkill : skills[0].name,
       activeLesson: item.activeLesson,
       completedActivities: item.completedActivities.filter((activity): activity is string => typeof activity === "string"),
       activityNotes: Object.fromEntries(Object.entries(item.activityNotes).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
       projectChecks: Object.fromEntries(Object.entries(item.projectChecks).filter((entry): entry is [string, boolean[]] => Array.isArray(entry[1]) && entry[1].every((checked) => typeof checked === "boolean"))),
       videoScenes: Object.fromEntries(Object.entries(item.videoScenes).filter((entry): entry is [string, number] => typeof entry[1] === "number" && Number.isInteger(entry[1]))),
+      skillChallengeAnswers: typeof item.skillChallengeAnswers === "object" && item.skillChallengeAnswers !== null && !Array.isArray(item.skillChallengeAnswers)
+        ? Object.fromEntries(Object.entries(item.skillChallengeAnswers).filter((entry): entry is [string, ScenarioAnswer] =>
+          typeof entry[1] === "object" && entry[1] !== null && !Array.isArray(entry[1]) &&
+          Number.isInteger((entry[1] as Record<string, unknown>).opening) &&
+          ((entry[1] as Record<string, unknown>).opening as number) >= 0 &&
+          ((entry[1] as Record<string, unknown>).opening as number) <= 2 &&
+          (((entry[1] as Record<string, unknown>).followup === null) ||
+            (Number.isInteger((entry[1] as Record<string, unknown>).followup) &&
+              ((entry[1] as Record<string, unknown>).followup as number) >= 0 &&
+              ((entry[1] as Record<string, unknown>).followup as number) <= 2))))
+        : {},
+      quizAnswers: typeof item.quizAnswers === "object" && item.quizAnswers !== null && !Array.isArray(item.quizAnswers)
+        ? Object.fromEntries(Object.entries(item.quizAnswers).filter((entry) => typeof entry[1] === "object" && entry[1] !== null && !Array.isArray(entry[1]))
+          .map(([skill, answers]) => [skill, Object.fromEntries(Object.entries(answers as Record<string, unknown>).filter((answer): answer is [string, number] => Number.isInteger(answer[1]) && (answer[1] as number) >= 0 && (answer[1] as number) <= 3))]))
+        : {},
+      skillPlans: typeof item.skillPlans === "object" && item.skillPlans !== null && !Array.isArray(item.skillPlans)
+        ? Object.fromEntries(Object.entries(item.skillPlans)
+          .filter((entry) => isSkillPlan(entry[1]))
+          .map(([key, plan]) => [key, {
+            ...plan as SkillPlan,
+            weeklyQuestHistory: isWeeklyQuestHistory((plan as SkillPlan).weeklyQuestHistory)
+              ? (plan as SkillPlan).weeklyQuestHistory
+              : {},
+          }]))
+        : {},
     };
   } catch (error) {
     console.warn("Unable to read SaikiScio progress from this browser.", error);
     return null;
   }
+}
+
+function isSkillPlan(value: unknown): value is SkillPlan {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  const roadmap = item.generatedRoadmap == null ? null : parseGeneratedRoadmap(item.generatedRoadmap);
+  const inputs = item.generatedRoadmapInputs;
+  const inputObject = typeof inputs === "object" && inputs !== null && !Array.isArray(inputs)
+    ? inputs as Record<string, unknown>
+    : null;
+  const weeklyHours = inputObject?.weeklyHours;
+  const validInputs = inputs === null || (
+    inputObject !== null &&
+    typeof inputObject.skill === "string" &&
+    typeof inputObject.explanation === "string" &&
+    typeof weeklyHours === "number" &&
+    weeklyHours >= 1 &&
+    weeklyHours <= 10
+  );
+  return typeof item.skill === "string" && item.skill.trim().length > 0 && item.skill.length <= 180 &&
+    typeof item.step === "number" && Number.isInteger(item.step) && item.step >= 0 && item.step <= 2 && Array.isArray(item.selectedMethods) &&
+    item.selectedMethods.every((method) => methods.some((candidate) => candidate.name === method)) &&
+    (item.generatedRoadmap == null || roadmap !== null) && validInputs &&
+    typeof item.goal === "string" && typeof item.confidence === "object" && item.confidence !== null &&
+    Object.values(item.confidence).every((level) => typeof level === "number") &&
+    typeof item.hours === "number" && Number.isInteger(item.hours) && item.hours >= 1 && item.hours <= 10 && typeof item.targetDate === "string" &&
+    (item.savedPage === "assessment" || item.savedPage === "results") &&
+    typeof item.started === "boolean" && Array.isArray(item.completedTasks) &&
+    item.completedTasks.every((index) => typeof index === "number" && Number.isInteger(index)) &&
+    typeof item.roadmapPracticeNotes === "object" && item.roadmapPracticeNotes !== null &&
+    Object.values(item.roadmapPracticeNotes).every((note) => typeof note === "string") &&
+    Array.isArray(item.completedMilestones) && item.completedMilestones.every((index) => typeof index === "number" && Number.isInteger(index)) &&
+    Array.isArray(item.completedRoutineSegments) && item.completedRoutineSegments.every((index) => typeof index === "number" && Number.isInteger(index)) &&
+    (item.weeklyQuestHistory === undefined || isWeeklyQuestHistory(item.weeklyQuestHistory));
+}
+
+function isWeeklyQuestHistory(value: unknown): value is Record<string, WeeklyQuestRecord> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) &&
+    Object.values(value).every((record) =>
+      typeof record === "object" && record !== null && !Array.isArray(record) &&
+      Array.isArray((record as Record<string, unknown>).completed) &&
+      ((record as Record<string, unknown>).completed as unknown[]).every((id) => typeof id === "string") &&
+      typeof (record as Record<string, unknown>).notes === "object" &&
+      (record as Record<string, unknown>).notes !== null &&
+      Object.values((record as Record<string, unknown>).notes as Record<string, unknown>).every((note) => typeof note === "string")
+    );
 }
 
 function parseGeneratedRoadmap(value: unknown): GeneratedRoadmap | null {
@@ -543,6 +774,7 @@ function App() {
   const { pathname, search } = useLocation();
   const navigate = useNavigate();
   const [savedProgress, setSavedProgress] = useState(readSavedProgress);
+  const [skillPlanLibrary, setSkillPlanLibrary] = useState<Record<string, SkillPlan>>(() => savedProgress?.skillPlans ?? {});
   const [journeyTouched, setJourneyTouched] = useState(() => savedProgress !== null);
   const [page, setPage] = useState<"home" | "assessment" | "results">("home");
   const [step, setStep] = useState(savedProgress?.step ?? 0);
@@ -562,6 +794,10 @@ function App() {
   const [completedTasks, setCompletedTasks] = useState<number[]>(savedProgress?.completedTasks ?? []);
   const [roadmapPracticeNotes, setRoadmapPracticeNotes] = useState<Record<string, string>>(savedProgress?.roadmapPracticeNotes ?? {});
   const [completedMilestones, setCompletedMilestones] = useState<number[]>(savedProgress?.completedMilestones ?? []);
+  const [completedRoutineSegments, setCompletedRoutineSegments] = useState<number[]>(savedProgress?.completedRoutineSegments ?? []);
+  const [weeklyQuestHistory, setWeeklyQuestHistory] = useState<Record<string, WeeklyQuestRecord>>(
+    () => savedProgress?.skillPlans[savedProgress.selectedSkills[0]?.toLocaleLowerCase() ?? ""]?.weeklyQuestHistory ?? {},
+  );
   const [activeRoadmapPractice, setActiveRoadmapPractice] = useState<number | null>(null);
   const [activeLearningSkill, setActiveLearningSkill] = useState(savedProgress?.activeLearningSkill ?? "Communication");
   const [activeLesson, setActiveLesson] = useState<LearningMethod | null>(savedProgress?.activeLesson ?? null);
@@ -569,6 +805,7 @@ function App() {
   const [activityNotes, setActivityNotes] = useState<Record<string, string>>(savedProgress?.activityNotes ?? {});
   const [projectChecks, setProjectChecks] = useState<Record<string, boolean[]>>(savedProgress?.projectChecks ?? {});
   const [videoScenes, setVideoScenes] = useState<Record<string, number>>(savedProgress?.videoScenes ?? {});
+  const [quizAnswers, setQuizAnswers] = useState<Record<string, Record<string, number>>>(savedProgress?.quizAnswers ?? {});
   const [cookieNotice, setCookieNotice] = useState("");
   const [supportNotice, setSupportNotice] = useState("");
   const [storageError, setStorageError] = useState("");
@@ -592,7 +829,9 @@ function App() {
   const [newAccountPassword, setNewAccountPassword] = useState("");
   const [accountMessage, setAccountMessage] = useState("");
   const [activeSkillPreview, setActiveSkillPreview] = useState<string | null>("Communication");
-  const [skillChallengeAnswers, setSkillChallengeAnswers] = useState<Record<string, number>>({});
+  const [skillChallengeAnswers, setSkillChallengeAnswers] = useState<Record<string, ScenarioAnswer>>(savedProgress?.skillChallengeAnswers ?? {});
+  const [planPickerOpen, setPlanPickerOpen] = useState(false);
+  const [newPlanSkill, setNewPlanSkill] = useState("");
   const [error, setError] = useState("");
 
   const activeGuide = skillGuides[activeLearningSkill] ?? skillGuides.Communication;
@@ -601,7 +840,7 @@ function App() {
     [selectedSkills, goal, confidence, selectedMethods, hours],
   );
   const currentRoadmapInputs: RoadmapInputs = {
-    skill: selectedSkills.join(", "),
+    skill: selectedSkills[0] ?? "Communication",
     explanation: goal,
     weeklyHours: hours,
   };
@@ -613,11 +852,54 @@ function App() {
     roadmapMatchesInputs(generatedRoadmap, currentRoadmapInputs)
       ? generatedRoadmap
       : null;
+  const activeSkillName = currentRoadmapInputs.skill;
+  const captureActiveSkillPlan = (): SkillPlan => ({
+    skill: activeSkillName,
+    step,
+    generatedRoadmap,
+    generatedRoadmapInputs,
+    goal,
+    confidence,
+    selectedMethods,
+    hours,
+    targetDate,
+    savedPage,
+    started,
+    completedTasks,
+    roadmapPracticeNotes,
+    completedMilestones,
+    completedRoutineSegments,
+    weeklyQuestHistory,
+  });
+  const availableSkillPlans = {
+    ...skillPlanLibrary,
+    [activeSkillName.toLocaleLowerCase()]: captureActiveSkillPlan(),
+  };
+  const activeWeekKey = currentWeekKey();
+  const activeWeekRecord = weeklyQuestHistory[activeWeekKey] ?? { completed: [], notes: {} };
+  const weeklyQuests = buildWeeklyQuests(activeSkillName, goal, confidence[activeSkillName] ?? 2, visibleRoadmap, activeWeekKey);
+  const quickQuiz = buildQuickQuiz(activeLearningSkill);
+  const activeQuizAnswers = quizAnswers[activeLearningSkill] ?? {};
+  const completedWeeklyQuestCount = weeklyQuests.filter((quest) => activeWeekRecord.completed.includes(quest.id)).length;
+  const nextRoadmapActionIndex = visibleRoadmap?.actionItems.findIndex((_, index) => !completedTasks.includes(index)) ?? -1;
+  const nextRoutineSegmentIndex = visibleRoadmap?.practiceRoutine.segments.findIndex((_, index) => !completedRoutineSegments.includes(index)) ?? -1;
+  const roadmapCheckpointCount = visibleRoadmap
+    ? visibleRoadmap.actionItems.length + visibleRoadmap.milestones.length + visibleRoadmap.practiceRoutine.segments.length
+    : 0;
+  const completedRoadmapCheckpointCount = visibleRoadmap
+    ? completedTasks.filter((index) => index >= 0 && index < visibleRoadmap.actionItems.length).length +
+      completedMilestones.filter((index) => index >= 0 && index < visibleRoadmap.milestones.length).length +
+      completedRoutineSegments.filter((index) => index >= 0 && index < visibleRoadmap.practiceRoutine.segments.length).length
+    : 0;
+  const roadmapProgressPercent = roadmapCheckpointCount > 0
+    ? Math.round((completedRoadmapCheckpointCount / roadmapCheckpointCount) * 100)
+    : 0;
 
   const applyProgress = (progress: SavedProgress) => {
     setSavedProgress(progress);
+    setSkillPlanLibrary(progress.skillPlans);
     setStep(progress.step);
-    setSelectedSkills(progress.selectedSkills.length ? progress.selectedSkills : ["Communication"]);
+    setSelectedSkills(progress.selectedSkills.length ? progress.selectedSkills.slice(0, 1) : ["Communication"]);
     setGeneratedRoadmap(progress.generatedRoadmap);
     setGeneratedRoadmapInputs(progress.generatedRoadmapInputs);
     setGoal(progress.goal);
@@ -630,12 +912,16 @@ function App() {
     setCompletedTasks(progress.completedTasks);
     setRoadmapPracticeNotes(progress.roadmapPracticeNotes);
     setCompletedMilestones(progress.completedMilestones);
+    setCompletedRoutineSegments(progress.completedRoutineSegments);
+    setWeeklyQuestHistory(progress.skillPlans[progress.selectedSkills[0]?.toLocaleLowerCase() ?? ""]?.weeklyQuestHistory ?? {});
     setActiveLearningSkill(progress.activeLearningSkill);
     setActiveLesson(progress.activeLesson);
     setCompletedActivities(progress.completedActivities);
     setActivityNotes(progress.activityNotes);
     setProjectChecks(progress.projectChecks);
     setVideoScenes(progress.videoScenes);
+    setQuizAnswers(progress.quizAnswers);
+    setSkillChallengeAnswers(progress.skillChallengeAnswers);
     setJourneyTouched(true);
   };
 
@@ -644,6 +930,10 @@ function App() {
     const progress: SavedProgress = {
       step,
       selectedSkills,
+      skillPlans: {
+        ...skillPlanLibrary,
+        [activeSkillName.toLocaleLowerCase()]: captureActiveSkillPlan(),
+      },
       generatedRoadmap,
       generatedRoadmapInputs,
       goal,
@@ -656,12 +946,15 @@ function App() {
       completedTasks,
       roadmapPracticeNotes,
       completedMilestones,
+      completedRoutineSegments,
       activeLearningSkill,
       activeLesson,
       completedActivities,
       activityNotes,
       projectChecks,
       videoScenes,
+      skillChallengeAnswers,
+      quizAnswers,
     };
     try {
       window.localStorage.setItem(progressStorageKey, JSON.stringify(progress));
@@ -671,7 +964,7 @@ function App() {
       console.error("Unable to save SaikiScio progress in this browser.", saveError);
       setStorageError("Your browser could not save this update. Check its storage settings or export your notes before leaving.");
     }
-  }, [journeyTouched, step, selectedSkills, generatedRoadmap, generatedRoadmapInputs, goal, confidence, selectedMethods, hours, targetDate, savedPage, started, completedTasks, roadmapPracticeNotes, completedMilestones, activeLearningSkill, activeLesson, completedActivities, activityNotes, projectChecks, videoScenes]);
+  }, [journeyTouched, skillPlanLibrary, step, selectedSkills, generatedRoadmap, generatedRoadmapInputs, goal, confidence, selectedMethods, hours, targetDate, savedPage, started, completedTasks, roadmapPracticeNotes, completedMilestones, completedRoutineSegments, weeklyQuestHistory, activeLearningSkill, activeLesson, completedActivities, activityNotes, projectChecks, videoScenes, skillChallengeAnswers, quizAnswers]);
 
   useEffect(() => {
     let active = true;
@@ -724,7 +1017,7 @@ function App() {
         console.warn("Unable to initialize SaikiScio account session.", error);
         if (active) {
           const detail = error instanceof TypeError
-            ? "The local SaikiScio API is not responding. Keep “npm run dev:api” running, then retry."
+            ? localApiUnavailableMessage
             : error instanceof Error
               ? `Account sync could not start: ${error.message}`
               : "Account sync could not start because of an unexpected error.";
@@ -753,13 +1046,97 @@ function App() {
         setDatabaseNotice("");
       }).catch((error: unknown) => {
         console.error("Unable to sync SaikiScio progress to PostgreSQL.", error);
-        setDatabaseNotice("PostgreSQL could not save this update. Your progress is still saved in this browser.");
+        const detail = error instanceof TypeError
+          ? localApiUnavailableMessage
+          : error instanceof Error
+            ? error.message
+            : "An unexpected error occurred.";
+        setDatabaseNotice(`Account sync could not save this update: ${detail} Your progress is still saved in this browser.`);
       });
     }, 500);
     return () => window.clearTimeout(timeout);
   }, [accountSyncReady, currentUser, journeyTouched, savedProgress]);
 
   const hasSavedProgress = savedProgress !== null;
+
+  const applySkillPlan = (skillPlan: SkillPlan) => {
+    setSelectedSkills([skillPlan.skill]);
+    setActiveLearningSkill(skillPlan.skill);
+    setStep(skillPlan.step);
+    setGeneratedRoadmap(skillPlan.generatedRoadmap);
+    setGeneratedRoadmapInputs(skillPlan.generatedRoadmapInputs);
+    setGoal(skillPlan.goal);
+    setConfidence(skillPlan.confidence);
+    setSelectedMethods(skillPlan.selectedMethods.length ? skillPlan.selectedMethods : ["Hands-on projects", "Short lessons"]);
+    setHours(skillPlan.hours);
+    setTargetDate(skillPlan.targetDate);
+    setSavedPage(skillPlan.savedPage);
+    setStarted(skillPlan.started);
+    setCompletedTasks(skillPlan.completedTasks);
+    setRoadmapPracticeNotes(skillPlan.roadmapPracticeNotes);
+    setCompletedMilestones(skillPlan.completedMilestones);
+    setCompletedRoutineSegments(skillPlan.completedRoutineSegments);
+    setWeeklyQuestHistory(skillPlan.weeklyQuestHistory);
+    setPage(skillPlan.savedPage);
+    setJourneyTouched(true);
+    setPlanPickerOpen(false);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const switchSkillPlan = (skillPlan: SkillPlan) => {
+    if (skillPlan.skill.toLocaleLowerCase() === activeSkillName.toLocaleLowerCase()) return;
+    setSkillPlanLibrary((current) => ({
+      ...current,
+      [activeSkillName.toLocaleLowerCase()]: captureActiveSkillPlan(),
+    }));
+    applySkillPlan(skillPlan);
+  };
+
+  const startSkillPlan = (rawSkill: string, initialGoal = "") => {
+    const name = rawSkill.trim().replace(/\s+/g, " ");
+    if (!name || name.length > 180) {
+      setError("Enter a skill under 180 characters.");
+      return;
+    }
+    const existingPlan = skillPlanLibrary[name.toLocaleLowerCase()];
+    if (existingPlan) {
+      if (name.toLocaleLowerCase() === activeSkillName.toLocaleLowerCase()) {
+        setPlanPickerOpen(false);
+        return;
+      }
+      switchSkillPlan(existingPlan);
+      return;
+    }
+
+    const current = captureActiveSkillPlan();
+    setSkillPlanLibrary((plans) => ({
+      ...plans,
+      [activeSkillName.toLocaleLowerCase()]: current,
+    }));
+    setSelectedSkills([name]);
+    setActiveLearningSkill(name);
+    setStep(0);
+    setGeneratedRoadmap(null);
+    setGeneratedRoadmapInputs(null);
+    setGoal(initialGoal);
+    setSelectedMethods(["Hands-on projects", "Short lessons"]);
+    setHours(3);
+    setTargetDate("");
+    setSavedPage("assessment");
+    setStarted(false);
+    setCompletedTasks([]);
+    setRoadmapPracticeNotes({});
+    setCompletedMilestones([]);
+    setCompletedRoutineSegments([]);
+    setWeeklyQuestHistory({});
+    setRoadmapError("");
+    setError("");
+    setPage("assessment");
+    setJourneyTouched(true);
+    setPlanPickerOpen(false);
+    setNewPlanSkill("");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
 
   const retryAccountSync = async () => {
     setDatabaseNotice("Checking the local account service…");
@@ -784,7 +1161,7 @@ function App() {
     } catch (retryError) {
       console.error("SaikiScio account sync retry failed.", retryError);
       const detail = retryError instanceof TypeError
-        ? "The local SaikiScio API is not responding. Keep “npm run dev:api” running, then retry."
+        ? localApiUnavailableMessage
         : retryError instanceof Error
           ? retryError.message
           : "An unexpected error occurred.";
@@ -801,8 +1178,6 @@ function App() {
   const beginAssessment = () => {
     setStep(0);
     setError("");
-    setGeneratedRoadmap(null);
-    setGeneratedRoadmapInputs(null);
     setRoadmapError("");
     setJourneyTouched(true);
     setSavedPage("assessment");
@@ -811,11 +1186,7 @@ function App() {
   };
 
   const toggleSkill = (name: string) => {
-    setSelectedSkills((current) =>
-      current.includes(name)
-        ? current.length > 1 ? current.filter((skill) => skill !== name) : current
-        : [...current, name],
-    );
+    if (name.toLocaleLowerCase() !== activeSkillName.toLocaleLowerCase()) startSkillPlan(name);
     setError("");
   };
 
@@ -829,10 +1200,8 @@ function App() {
       setError("Keep the skill name under 180 characters.");
       return;
     }
-    setSelectedSkills([name]);
-    setActiveLearningSkill(name);
     setCustomSkillDraft("");
-    setError("");
+    startSkillPlan(name);
   };
 
   const toggleMethod = (name: LearningMethod) => {
@@ -846,7 +1215,7 @@ function App() {
 
   const generatePersonalizedRoadmap = async () => {
     const inputs: RoadmapInputs = {
-      skill: selectedSkills.join(", "),
+      skill: selectedSkills[0] ?? "Communication",
       explanation: goal,
       weeklyHours: hours,
     };
@@ -870,6 +1239,7 @@ function App() {
       setCompletedTasks([]);
       setRoadmapPracticeNotes({});
       setCompletedMilestones([]);
+      setCompletedRoutineSegments([]);
       setActiveRoadmapPractice(null);
       setStarted(false);
       setGeneratedRoadmap(roadmap);
@@ -900,6 +1270,7 @@ function App() {
       setCompletedTasks([]);
       setRoadmapPracticeNotes({});
       setCompletedMilestones([]);
+      setCompletedRoutineSegments([]);
       setActiveRoadmapPractice(null);
       await generatePersonalizedRoadmap();
       setSavedPage("results");
@@ -927,6 +1298,21 @@ function App() {
     );
   };
 
+  const toggleRoutineSegment = (index: number) => {
+    setStarted(true);
+    setCompletedRoutineSegments((current) =>
+      current.includes(index) ? current.filter((segment) => segment !== index) : [...current, index],
+    );
+  };
+
+  const focusRoadmapStep = (targetId: string, actionIndex: number | null = null) => {
+    setStarted(true);
+    if (actionIndex !== null) setActiveRoadmapPractice(actionIndex);
+    window.setTimeout(() => {
+      document.getElementById(targetId)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 40);
+  };
+
   const toggleProjectCheck = (index: number) => {
     setProjectChecks((current) => {
       const checks = current[activeLearningSkill] ?? [false, false, false];
@@ -945,6 +1331,7 @@ function App() {
   const clearLearningState = () => {
     setJourneyTouched(false);
     setSavedProgress(null);
+    setSkillPlanLibrary({});
     setStep(0);
     setSelectedSkills(["Communication"]);
     setGoal("");
@@ -955,6 +1342,9 @@ function App() {
     setSavedPage("assessment");
     setStarted(false);
     setCompletedTasks([]);
+    setRoadmapPracticeNotes({});
+    setCompletedMilestones([]);
+    setCompletedRoutineSegments([]);
     setGeneratedRoadmap(null);
     setGeneratedRoadmapInputs(null);
     setActiveLearningSkill("Communication");
@@ -963,6 +1353,8 @@ function App() {
     setActivityNotes({});
     setProjectChecks({});
     setVideoScenes({});
+    setQuizAnswers({});
+    setSkillChallengeAnswers({});
     try {
       window.localStorage.removeItem(progressStorageKey);
       setStorageError("");
@@ -1411,7 +1803,7 @@ function App() {
                 <button className="button-primary" onClick={beginAssessment}>Find your next skill <Icon name="arrow" size={17} /></button>
                 <span className="time-note"><Icon name="clock" size={15} /> Just 2 minutes to begin</span>
               </div>
-              {hasSavedProgress && <div className="saved-progress-card"><div><strong>{currentUser ? "Your learning is saved to your account." : "Your learning is saved on this device."}</strong><span>{savedPage === "results" ? `${completedActivities.length} lessons tried · ${completedTasks.length} plan steps complete` : `Check-in saved at step ${step + 1} of 3`}</span><button className="saved-progress-clear" onClick={startFresh}>Forget saved progress</button></div><button className="button-quiet" onClick={resumeJourney}>{savedPage === "results" ? "Return to my learning" : "Continue my check-in"} <Icon name="arrow" size={15} /></button></div>}
+              {hasSavedProgress && <div className="saved-progress-card"><div><strong>{currentUser ? "Your learning is saved to your account." : "Your learning is saved on this device."}</strong><span>{savedPage === "results" ? `${completedActivities.length} lessons tried · ${completedTasks.length} plan steps complete` : `Check-in saved at step ${step + 1} of 3`}</span><button className="saved-progress-clear" onClick={startFresh}>Forget saved progress</button></div><button className="button-primary saved-progress-return" onClick={resumeJourney}>Return to my learning <Icon name="arrow" size={15} /></button></div>}
               <div className="social-proof">
                 <div className="avatar-stack" aria-hidden="true"><span>J</span><span>M</span><span>A</span><span>+</span></div>
                 <p><strong>Small steps, real momentum.</strong><br />A more human way to keep learning.</p>
@@ -1479,7 +1871,9 @@ function App() {
                 {skills.map((skill) => {
                   const challenge = skillChallenges[skill.name];
                   const expanded = activeSkillPreview === skill.name;
-                  const selectedAnswer = skillChallengeAnswers[skill.name];
+                  const challengeAnswers = skillChallengeAnswers[skill.name];
+                  const selectedAnswer = challengeAnswers?.opening;
+                  const selectedFollowup = challengeAnswers?.followup;
                   const challengeId = `skill-challenge-${skill.name.toLowerCase().replace(/ /g, "-")}`;
                   return <article className={`skill-explorer ${expanded ? "expanded" : ""}`} key={skill.name}>
                     <button type="button" className="skill-row" aria-expanded={expanded} aria-controls={challengeId} onClick={() => setActiveSkillPreview(expanded ? null : skill.name)}>
@@ -1489,15 +1883,25 @@ function App() {
                       <span className="skill-challenge-kicker">A QUICK, NO-SCORE CHALLENGE</span>
                       <p className="skill-challenge-question">{challenge.scenario}</p>
                       <div className="skill-challenge-options" role="group" aria-label={`Choose an approach for ${skill.name}`}>
-                        {challenge.choices.map((choice, index) => <button type="button" key={choice.label} className={`skill-challenge-option ${selectedAnswer === index ? "chosen" : ""}`} aria-pressed={selectedAnswer === index} onClick={() => setSkillChallengeAnswers((current) => ({ ...current, [skill.name]: index }))}>
+                        {challenge.choices.map((choice, index) => <button type="button" key={choice.label} className={`skill-challenge-option ${selectedAnswer === index ? "chosen" : ""}`} aria-pressed={selectedAnswer === index} onClick={() => setSkillChallengeAnswers((current) => ({ ...current, [skill.name]: { opening: index, followup: null } }))}>
                           <span>{String.fromCharCode(65 + index)}</span>{choice.label}
                         </button>)}
                       </div>
-                      {selectedAnswer !== undefined ? <div className="skill-challenge-feedback" role="status"><span className="skill-feedback-icon"><Icon name="spark" size={16} /></span><p><strong>One idea to take with you</strong>{challenge.choices[selectedAnswer].insight}</p></div> : <p className="skill-challenge-hint">Pick the approach you’d try. There’s no score—each choice is a chance to think it through.</p>}
+                      {selectedAnswer !== undefined ? <>
+                        <div className="skill-challenge-feedback" role="status"><span className="skill-feedback-icon"><Icon name="spark" size={16} /></span><p><strong>Why this can help</strong>{challenge.choices[selectedAnswer].insight}</p></div>
+                        <div className="scenario-next-turn">
+                          <span className="skill-challenge-kicker">THE SITUATION CHANGES</span>
+                          <p className="skill-challenge-question">{scenarioBranches[selectedAnswer].setup}</p>
+                          <div className="skill-challenge-options" role="group" aria-label={`Choose what to do next for ${skill.name}`}>
+                            {scenarioBranches[selectedAnswer].choices.map((choice, index) => <button type="button" key={choice.label} className={`skill-challenge-option ${selectedFollowup === index ? "chosen" : ""}`} aria-pressed={selectedFollowup === index} onClick={() => setSkillChallengeAnswers((current) => ({ ...current, [skill.name]: { opening: selectedAnswer, followup: index } }))}>
+                              <span>{String.fromCharCode(65 + index)}</span>{choice.label}
+                            </button>)}
+                          </div>
+                          {selectedFollowup !== null && selectedFollowup !== undefined && <div className="skill-challenge-feedback" role="status"><span className="skill-feedback-icon"><Icon name="spark" size={16} /></span><p><strong>Take this idea with you</strong>{scenarioBranches[selectedAnswer].choices[selectedFollowup].insight}</p></div>}
+                        </div>
+                      </> : <p className="skill-challenge-hint">Pick an approach to see what happens next. There is no score—each choice is a chance to think it through.</p>}
                       <button type="button" className="button-primary skill-challenge-cta" onClick={() => {
-                        setSelectedSkills([skill.name]);
-                        setGoal(`I’d like to ${challenge.goal}.`);
-                        beginAssessment();
+                        startSkillPlan(skill.name, `I’d like to ${challenge.goal}.`);
                       }}>Build a plan for {skill.name} <Icon name="arrow" size={15} /></button>
                     </div>}
                   </article>;
@@ -1537,7 +1941,7 @@ function App() {
                 <div className="assessment-content">
                   <span className="question-label">FIRST, THE FUN PART</span>
                   <h2 id="assessment-title">What would you like to get a little better at?</h2>
-                  <p className="question-hint">Choose whatever feels most useful right now. You can pick more than one.</p>
+                  <p className="question-hint">Choose one skill to focus this plan. You can create and switch between separate plans whenever you like.</p>
                   <div className="assessment-skills">
                     {skills.map((skill) => (
                       <button type="button" key={skill.name} aria-pressed={selectedSkills.includes(skill.name)} className={`assessment-skill ${selectedSkills.includes(skill.name) ? "selected" : ""}`} onClick={() => toggleSkill(skill.name)}>
@@ -1550,7 +1954,7 @@ function App() {
                     <input id="custom-skill" value={customSkillDraft} maxLength={180} onChange={(event) => setCustomSkillDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addCustomSkill(); } }} placeholder="For example: guitar, pottery, or Python" />
                     <button type="button" className="button-quiet" onClick={addCustomSkill}>Use this skill</button>
                   </div>
-                  {selectedSkills.some((name) => !Object.prototype.hasOwnProperty.call(skillGuides, name)) && <p className="custom-skill-selected">Your roadmap will focus on: <strong>{selectedSkills.join(", ")}</strong></p>}
+                  {selectedSkills.some((name) => !Object.prototype.hasOwnProperty.call(skillGuides, name)) && <p className="custom-skill-selected">Your roadmap will focus on: <strong>{selectedSkills[0]}</strong></p>}
                   <label className="field-label" htmlFor="goal">What would you love to do with this skill?</label>
                   <textarea id="goal" value={goal} onChange={(event) => { setGoal(event.target.value); setError(""); }} placeholder="Tell us what you can do now, what you want to achieve, and any challenges or context that could shape your practice…" rows={4} maxLength={1200} />
                   <div className="field-footer"><span>A few specific details help your coach make a more useful roadmap. You can leave this blank.</span><span>{goal.length}/1200</span></div>
@@ -1613,13 +2017,94 @@ function App() {
             <div className="results-copy"><span className="eyebrow">YOUR PERSONAL GROWTH PLAN</span><h1>A good next step<br />for <span className="serif-italic">you.</span></h1><p className="results-summary">{goal || "You’re ready to make space for something new."}</p><div className="results-tags"><span><Icon name="clock" size={14} /> {hours} {hours === 1 ? "hour" : "hours"} a week</span><span><Icon name="spark" size={14} /> {selectedMethods.length} ways to learn</span>{targetDate && <span><Icon name="target" size={14} /> By {new Date(`${targetDate}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>}</div></div>
             <div className="results-bloom"><div className="bloom-center"><Icon name="leaf" size={32} /></div><span className="bloom-petal petal-one" /><span className="bloom-petal petal-two" /><span className="bloom-petal petal-three" /><span className="bloom-petal petal-four" /><span className="bloom-petal petal-five" /><span className="bloom-label">GROWING<br />YOUR WAY</span></div>
           </section>
+          <section className="weekly-quests" aria-labelledby="weekly-quests-title">
+            <div className="weekly-quests-heading">
+              <div><span className="eyebrow">YOUR WEEKLY SPOTLIGHT</span><h2 id="weekly-quests-title">Your mini-quests for this week</h2><p>Fresh, practical missions for {activeSkillName.toLowerCase()}{visibleRoadmap ? ", shaped by your AI roadmap" : goal.trim() ? " and tailored to the goal you shared" : ""}. Complete them at your own pace; new quests arrive every Monday.</p></div>
+              <div className="quest-week-badge" aria-label="Weekly quest cycle, 1 of 7"><Icon name="target" size={16} />1/7</div>
+            </div>
+            <div className="quest-progress" aria-label="Weekly quest progress">
+              <div><strong>{completedWeeklyQuestCount === weeklyQuests.length ? "All this week’s quests complete—wonderful work!" : `${completedWeeklyQuestCount} of ${weeklyQuests.length} quests complete`}</strong><span>{Math.round((completedWeeklyQuestCount / weeklyQuests.length) * 100)}% of this week’s practice</span></div>
+              <div className="roadmap-overview-track" role="progressbar" aria-label="This week's quest progress" aria-valuemin={0} aria-valuemax={weeklyQuests.length} aria-valuenow={completedWeeklyQuestCount}><span style={{ width: `${Math.round((completedWeeklyQuestCount / weeklyQuests.length) * 100)}%` }} /></div>
+            </div>
+            <div className="quest-list">
+              {weeklyQuests.map((quest, index) => {
+                const complete = activeWeekRecord.completed.includes(quest.id);
+                const note = activeWeekRecord.notes[quest.id] ?? "";
+                return <article className={`quest-card ${complete ? "complete" : ""}`} key={quest.id}>
+                  <span className="quest-number">{complete ? <Icon name="check" size={15} /> : `0${index + 1}`}</span>
+                  <div className="quest-card-content"><span className="lesson-step-label">QUEST 0{index + 1} · ABOUT {Math.max(5, Math.round(hours * 3))} MIN</span><h3>{quest.title}</h3><p>{quest.instructions}</p>
+                    <label className="field-label" htmlFor={`quest-note-${quest.id}`}>{quest.reflectionPrompt}</label>
+                    <textarea id={`quest-note-${quest.id}`} rows={2} maxLength={500} value={note} placeholder="A few words is enough; this reflection stays with this week's quest." onChange={(event) => setWeeklyQuestHistory((current) => {
+                      const record = current[activeWeekKey] ?? { completed: [], notes: {} };
+                      return { ...current, [activeWeekKey]: { ...record, notes: { ...record.notes, [quest.id]: event.target.value } } };
+                    })} />
+                    <button type="button" className={`quest-complete-button ${complete ? "done" : ""}`} aria-pressed={complete} onClick={() => setWeeklyQuestHistory((current) => {
+                      const record = current[activeWeekKey] ?? { completed: [], notes: {} };
+                      const completed = record.completed.includes(quest.id)
+                        ? record.completed.filter((id) => id !== quest.id)
+                        : [...record.completed, quest.id];
+                      return { ...current, [activeWeekKey]: { ...record, completed } };
+                    })}>{complete ? <><Icon name="check" size={14} /> Completed — undo</> : <>Complete this quest <Icon name="arrow" size={14} /></>}</button>
+                  </div>
+                </article>;
+              })}
+            </div>
+            {Object.entries(weeklyQuestHistory)
+              .filter(([weekKey, record]) => weekKey !== activeWeekKey && (record.completed.length > 0 || Object.keys(record.notes).length > 0))
+              .sort(([first], [second]) => second.localeCompare(first)).length > 0 && <details className="quest-history">
+                <summary>See past quest weeks ({Object.entries(weeklyQuestHistory).filter(([weekKey, record]) => weekKey !== activeWeekKey && (record.completed.length > 0 || Object.keys(record.notes).length > 0)).length})</summary>
+                <ul>{Object.entries(weeklyQuestHistory)
+                  .filter(([weekKey, record]) => weekKey !== activeWeekKey && (record.completed.length > 0 || Object.keys(record.notes).length > 0))
+                  .sort(([first], [second]) => second.localeCompare(first))
+                  .map(([weekKey, record]) => <li key={weekKey}><strong>{formatWeekKey(weekKey)}</strong><span>{record.completed.length} quests completed{Object.keys(record.notes).length > 0 ? ` · ${Object.keys(record.notes).length} reflections saved` : ""}</span></li>)}</ul>
+              </details>}
+          </section>
+          <section className="skill-plans-panel" aria-label="Your saved skill plans">
+            <div className="skill-plans-heading"><div><span className="eyebrow">ONE FOCUS AT A TIME</span><h2>Your skill plans</h2><p>Each plan keeps its own answers, roadmap, notes, and progress. Switch focus whenever you want.</p></div><button type="button" className="button-quiet" aria-expanded={planPickerOpen} onClick={() => setPlanPickerOpen((open) => !open)}>{planPickerOpen ? "Close" : "Start another skill"} <Icon name={planPickerOpen ? "chevron" : "arrow"} size={14} /></button></div>
+            <div className="skill-plan-list" role="group" aria-label="Switch between saved plans">
+              {Object.entries(availableSkillPlans).map(([key, skillPlan]) => <button type="button" key={key} className={`skill-plan-tab ${key === activeSkillName.toLocaleLowerCase() ? "active" : ""}`} aria-pressed={key === activeSkillName.toLocaleLowerCase()} onClick={() => switchSkillPlan(skillPlan)}>
+                <strong>{skillPlan.skill}</strong><span>{skillPlan.savedPage === "results" && skillPlan.generatedRoadmap ? "Roadmap saved" : "Check-in saved"}</span>
+              </button>)}
+            </div>
+            {planPickerOpen && <div className="new-skill-plan">
+              <span className="lesson-step-label">CHOOSE A SKILL FOR A SEPARATE PLAN</span>
+              <div className="new-skill-options">{skills.map((skill) => <button type="button" key={skill.name} onClick={() => startSkillPlan(skill.name)}>{skill.name}</button>)}</div>
+              <label className="field-label" htmlFor="new-plan-skill">Or create a custom skill plan</label>
+              <div className="custom-skill-entry"><input id="new-plan-skill" value={newPlanSkill} maxLength={180} onChange={(event) => setNewPlanSkill(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); startSkillPlan(newPlanSkill); } }} placeholder="For example: guitar, pottery, or Python" /><button type="button" className="button-quiet" onClick={() => startSkillPlan(newPlanSkill)} disabled={!newPlanSkill.trim()}>Create plan</button></div>
+            </div>}
+          </section>
           <section className="plan-section">
             {visibleRoadmap ? (
               <div className="roadmap-sections">
                 <article className="roadmap-section">
-                  <span className="eyebrow">YOUR LEARNING ROADMAP</span>
+                  <span className="eyebrow">YOUR AI-PERSONALIZED ROADMAP · {activeSkillName.toUpperCase()}</span>
                   <h2>1. Summary &amp; Focus Area</h2>
                   <p className="roadmap-summary">{visibleRoadmap.summary}</p>
+                  <div className="roadmap-overview" aria-label="Roadmap progress">
+                    <div className="roadmap-overview-heading">
+                      <div><span className="lesson-step-label">YOUR MOMENTUM</span><strong>{roadmapProgressPercent === 100 ? "You completed every roadmap checkpoint." : roadmapProgressPercent > 0 ? "Every small step is moving you forward." : "Your plan is ready when you are."}</strong></div>
+                      <span>{roadmapProgressPercent}%</span>
+                    </div>
+                    <div className="roadmap-overview-track" role="progressbar" aria-label="Overall roadmap progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={roadmapProgressPercent}><span style={{ width: `${roadmapProgressPercent}%` }} /></div>
+                    <p>{completedRoadmapCheckpointCount} of {roadmapCheckpointCount} actions, milestones, and practice steps checked off. Your progress and notes save as you go.</p>
+                    <div className="roadmap-next-step">
+                      <span className="roadmap-next-icon"><Icon name={roadmapProgressPercent === 100 ? "spark" : "target"} size={18} /></span>
+                      <div><span className="lesson-step-label">{roadmapProgressPercent === 100 ? "A MOMENT TO CELEBRATE" : "YOUR NEXT SMALL STEP"}</span>
+                        <strong>{roadmapProgressPercent === 100
+                          ? "You made it through this roadmap."
+                          : nextRoadmapActionIndex >= 0
+                            ? visibleRoadmap.actionItems[nextRoadmapActionIndex].title
+                            : nextRoutineSegmentIndex >= 0
+                              ? visibleRoadmap.practiceRoutine.segments[nextRoutineSegmentIndex].activity
+                              : "Mark a milestone when you reach it."}</strong>
+                      </div>
+                      {roadmapProgressPercent < 100 && <button type="button" className="roadmap-next-button" onClick={() => {
+                        if (nextRoadmapActionIndex >= 0) focusRoadmapStep(`roadmap-action-${nextRoadmapActionIndex}`, nextRoadmapActionIndex);
+                        else if (nextRoutineSegmentIndex >= 0) focusRoadmapStep(`roadmap-routine-${nextRoutineSegmentIndex}`);
+                        else focusRoadmapStep("roadmap-milestones");
+                      }}>{nextRoadmapActionIndex >= 0 ? "Start this action" : nextRoutineSegmentIndex >= 0 ? "Open practice step" : "View milestones"} <Icon name="arrow" size={14} /></button>}
+                    </div>
+                  </div>
                 </article>
                 <article className="roadmap-section">
                   <h2>2. Core Action Items</h2>
@@ -1628,7 +2113,7 @@ function App() {
                       const complete = completedTasks.includes(index);
                       const practiceOpen = activeRoadmapPractice === index;
                       const note = roadmapPracticeNotes[String(index)] ?? "";
-                      return <li className={complete ? "roadmap-action-complete" : ""} key={`${item.title}-${index}`}>
+                      return <li id={`roadmap-action-${index}`} className={complete ? "roadmap-action-complete" : ""} key={`${item.title}-${index}`}>
                         <span className="roadmap-item-number">{complete ? <Icon name="check" size={14} /> : `0${index + 1}`}</span>
                         <div className="roadmap-action-content">
                           <h3>{item.title}</h3>
@@ -1678,18 +2163,23 @@ function App() {
                       return <li className={complete ? "roadmap-milestone-complete" : ""} key={`${milestone.stage}-${index}`}>
                         <span>{complete ? <Icon name="check" size={13} /> : `0${index + 1}`} · {milestone.stage}</span>
                         <p>{milestone.measurableOutcome}</p>
-                        <button type="button" className="roadmap-milestone-toggle" aria-pressed={complete} onClick={() => toggleMilestone(index)}>
+                        <button type="button" className="roadmap-milestone-toggle" aria-pressed={complete} onClick={() => { setStarted(true); toggleMilestone(index); }}>
                           {complete ? "Reached — undo" : "Mark as reached"}
                         </button>
                       </li>;
                     })}
                   </ol>
                 </article>
-                <article className="roadmap-section">
+                <article className="roadmap-section" id="roadmap-routine">
                   <h2>4. Recommended Practice Routine</h2>
                   <p className="roadmap-frequency">{visibleRoadmap.practiceRoutine.frequency} · {visibleRoadmap.practiceRoutine.sessionsPerWeek} sessions × {visibleRoadmap.practiceRoutine.totalMinutes} minutes ({visibleRoadmap.practiceRoutine.sessionsPerWeek * visibleRoadmap.practiceRoutine.totalMinutes} minutes per week)</p>
                   <ol className="roadmap-routine">
-                    {visibleRoadmap.practiceRoutine.segments.map((segment, index) => <li key={`${segment.activity}-${index}`}><span>{segment.minutes} min</span><div><h3>{segment.activity}</h3><p>{segment.instructions}</p></div></li>)}
+                    {visibleRoadmap.practiceRoutine.segments.map((segment, index) => {
+                      const complete = completedRoutineSegments.includes(index);
+                      return <li id={`roadmap-routine-${index}`} className={complete ? "roadmap-routine-complete" : ""} key={`${segment.activity}-${index}`}>
+                        <span>{segment.minutes} min</span><div><h3>{segment.activity}</h3><p>{segment.instructions}</p><button type="button" className="roadmap-routine-toggle" aria-pressed={complete} onClick={() => toggleRoutineSegment(index)}>{complete ? <><Icon name="check" size={13} /> Practice step done — undo</> : <>Mark this practice step done <Icon name="arrow" size={13} /></>}</button></div>
+                      </li>;
+                    })}
                   </ol>
                 </article>
                 <div className="roadmap-bottom">
@@ -1704,9 +2194,9 @@ function App() {
               <>
             {generatedRoadmap && !roadmapError && <div className="roadmap-error" role="status"><div><strong>This roadmap does not match your current answers.</strong><p>The saved roadmap may be from an earlier check-in or unrelated request. Generate a fresh roadmap to match your current skill and goal.</p></div><button className="button-quiet" onClick={() => void generatePersonalizedRoadmap()} disabled={roadmapBusy}>{roadmapBusy ? "Creating roadmap…" : "Generate updated roadmap"}</button></div>}
             {roadmapError && builtInLearningSkills.length > 0 && <div className="roadmap-error" role="alert"><div><strong>Your AI roadmap could not be generated.</strong><p>{roadmapError}</p></div><button className="button-quiet" onClick={() => void generatePersonalizedRoadmap()} disabled={roadmapBusy}>{roadmapBusy ? "Trying again…" : "Try again"}</button></div>}
-            {builtInLearningSkills.length === 0 && <div className="roadmap-unavailable"><div><h2>{roadmapError ? "Your custom-skill roadmap could not be generated" : "Your custom-skill roadmap isn't available yet"}</h2><p>{roadmapError || "Generate a domain-specific plan with Google AI Studio. If the API key is not configured, add GEMINI_API_KEY to the private .env file and restart the API."}</p></div><button className="button-quiet" onClick={() => void generatePersonalizedRoadmap()} disabled={roadmapBusy}>{roadmapBusy ? "Creating roadmap…" : roadmapError ? "Try again" : "Generate roadmap"}</button></div>}
+            {builtInLearningSkills.length === 0 && <div className="roadmap-unavailable"><div><h2>{roadmapError ? "Your AI roadmap couldn't be generated" : "Your custom-skill AI roadmap is ready to build"}</h2><p>{roadmapError || "Google AI Studio is configured. Create a tailored set of practical actions, measurable milestones, and a routine for your skill and goal."}</p></div><button className="button-quiet" onClick={() => void generatePersonalizedRoadmap()} disabled={roadmapBusy}>{roadmapBusy ? "Creating your roadmap…" : roadmapError ? "Try again" : "Build my AI roadmap"}</button></div>}
             {builtInLearningSkills.length > 0 && <>
-            <div className="plan-heading"><div><span className="eyebrow">A plan shaped by your answers</span><h2>Your first few <span className="serif-italic">steps.</span></h2><p className="plan-personalization">Built around {selectedSkills.join(" + ")}, your goal, starting confidence, and the ways you like to learn.</p></div><span className="plan-duration"><Icon name="clock" size={15} /> A gentle 3-week start</span></div>
+            <div className="plan-heading"><div><span className="eyebrow">A plan shaped by your answers</span><h2>Your first few <span className="serif-italic">steps.</span></h2><p className="plan-personalization">Built around {activeSkillName}, your goal, starting confidence, and the ways you like to learn.</p></div><span className="plan-duration"><Icon name="clock" size={15} /> A gentle 3-week start</span></div>
             {started && <div className="plan-progress"><div><strong>You’re on your way.</strong><span>{completedTasks.length} of {plan.length} steps complete</span></div><div className="plan-progress-track"><span style={{ width: `${(completedTasks.length / plan.length) * 100}%` }} /></div></div>}
             <div className="plan-steps">
               {plan.map((item, index) => {
@@ -1759,6 +2249,25 @@ function App() {
                 <div className="lesson-footer"><span className="lesson-save-note"><Icon name="leaf" size={14} /> {currentUser ? "Your lesson and progress save to your account." : "Your lesson and progress save on this device."}</span><button className={`task-toggle ${done ? "done" : ""}`} onClick={() => toggleActivityComplete(activityKey)}>{done ? <><Icon name="check" size={14} /> Lesson tried — nice work</> : <>Mark lesson tried <Icon name="arrow" size={14} /></>}</button></div>
               </article>;
             })()}
+            <article className="quick-quiz" aria-labelledby="quick-quiz-title">
+              <div className="quick-quiz-heading"><div><span className="eyebrow">RECALL IT, MAKE IT STICK</span><h3 id="quick-quiz-title">Quick lesson check</h3><p>No grades—use these questions to see what stayed with you.</p></div><span className="quiz-score">{Object.keys(activeQuizAnswers).length}/{quickQuiz.length} answered</span></div>
+              <div className="quiz-questions">
+                {quickQuiz.map((question, questionIndex) => {
+                  const answer = activeQuizAnswers[String(questionIndex)];
+                  return <fieldset className="quiz-question" key={`${activeLearningSkill}-${questionIndex}`}>
+                    <legend><span>0{questionIndex + 1}</span>{question.question}</legend>
+                    <div className="quiz-options">
+                      {question.options.map((option, optionIndex) => <button type="button" key={option} className={`quiz-option ${answer === optionIndex ? "selected" : ""}`} aria-pressed={answer === optionIndex} onClick={() => setQuizAnswers((current) => ({
+                        ...current,
+                        [activeLearningSkill]: { ...(current[activeLearningSkill] ?? {}), [String(questionIndex)]: optionIndex },
+                      }))}>{option}</button>)}
+                    </div>
+                    {answer !== undefined && <div className={`quiz-feedback ${answer === question.answerIndex ? "correct" : "try-again"}`} role="status"><strong>{answer === question.answerIndex ? "That’s it." : "Not quite—and that’s part of learning."}</strong><span>{question.explanation}</span></div>}
+                  </fieldset>;
+                })}
+              </div>
+              {Object.keys(activeQuizAnswers).length === quickQuiz.length && <p className="quiz-finish-note"><Icon name="spark" size={15} /> You made time to recall what you learned. That practice helps ideas stay with you.</p>}
+            </article>
             <p className="learning-source-note">Original SaikiScio learning materials for practice. Video lessons are written, scene-by-scene walkthroughs rather than streamed videos.</p>
           </section>}
           <div className="results-footer-note"><Icon name="leaf" size={16} /> Your path can change as you do. Come back and make it yours.</div>
