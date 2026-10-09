@@ -3,6 +3,14 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
+      "source": "/api/auth/:path*",
+      "destination": "/api/auth?route=:path*"
+    },
+    {
+      "source": "/api/roadmap/:path*",
+      "destination": "/api/roadmap?route=:path*"
+    },
+    {
       "source": "/((?!api/).*)",
       "destination": "/index.html"
     }

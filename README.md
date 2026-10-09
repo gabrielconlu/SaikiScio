@@ -63,7 +63,7 @@ npm run build
 
 ## Deploy to Vercel
 
-The repository includes a Vercel Node.js function at `api/[...path].mjs` for the existing `/api/*` routes and a single-page-app fallback for React Router. Vercel serves the frontend and API from the same origin; local PostgreSQL and the local API process are not used in production.
+The repository uses three Vercel Node.js functions: `api/[...path].mjs` handles top-level API routes, while `api/auth.mjs` and `api/roadmap.mjs` dispatch nested auth and roadmap routes. Rewrites keep API requests away from the React single-page-app fallback. This stays within Vercel Hobby's 12-function limit. Vercel serves the frontend and API from the same origin; local PostgreSQL and the local API process are not used in production.
 
 1. Create a managed PostgreSQL database (for example, through a Vercel Marketplace integration or another hosted PostgreSQL provider). Use its TLS-enabled connection string, preferably its serverless/pooled connection URL when offered.
 2. Before deploying, set `DATABASE_URL` in your terminal to the hosted database's TLS-enabled connection string and run `npm run db:setup` once. This applies the idempotent `server/schema.sql`; the script refuses to run without an explicit `DATABASE_URL`, so it will not accidentally apply a production schema to your local database. Do not expose database credentials in the browser or commit them.
