@@ -13,7 +13,9 @@ type IconName =
   | "chart"
   | "back"
   | "leaf"
-  | "chevron";
+  | "chevron"
+  | "eye"
+  | "eyeOff";
 
 type Skill = {
   name: string;
@@ -765,6 +767,8 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
     back: <><path d="M19 12H5" /><path d="m11 18-6-6 6-6" /></>,
     leaf: <><path d="M20 4c-8 0-14 3-14 10a6 6 0 0 0 6 6c7 0 8-8 8-16Z" /><path d="M4 21c2-5 6-8 11-11" /></>,
     chevron: <path d="m9 18 6-6-6-6" />,
+    eye: <><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" /><circle cx="12" cy="12" r="3" /></>,
+    eyeOff: <><path d="m3 3 18 18" /><path d="M10.6 10.6a2 2 0 0 0 2.8 2.8" /><path d="M9.9 5.2A10.8 10.8 0 0 1 12 5c6.4 0 10 7 10 7a15.9 15.9 0 0 1-3.1 3.9" /><path d="M6.2 6.2C3.5 8 2 12 2 12s3.6 7 10 7a10 10 0 0 0 3.1-.5" /></>,
   };
 
   return <svg {...common}>{drawings[name]}</svg>;
@@ -817,6 +821,8 @@ function App() {
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authPasswordConfirm, setAuthPasswordConfirm] = useState("");
+  const [showAuthPassword, setShowAuthPassword] = useState(false);
+  const [showAuthPasswordConfirm, setShowAuthPasswordConfirm] = useState(false);
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState("");
@@ -1743,8 +1749,8 @@ function App() {
 
           {(pathname === "/login" || pathname === "/register") && <form className="auth-form" onSubmit={(event) => void submitAuth(event)}>
             <label htmlFor="auth-email">Email address</label><input id="auth-email" type="email" autoComplete="email" maxLength={254} required value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="you@example.com" />
-            <label htmlFor="auth-password">Password</label><input id="auth-password" type="password" autoComplete={authMode === "register" ? "new-password" : "current-password"} minLength={6} maxLength={128} required value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} placeholder="At least 6 characters" />
-            {authMode === "register" && <><label htmlFor="auth-password-confirm">Confirm password</label><input id="auth-password-confirm" type="password" autoComplete="new-password" minLength={6} maxLength={128} required value={authPasswordConfirm} onChange={(event) => setAuthPasswordConfirm(event.target.value)} placeholder="Type your password again" /><div className="terms-consent"><input id="terms-consent" aria-label="I agree to the Terms of use and have read the Privacy notice" type="checkbox" checked={termsAccepted} onChange={(event) => setTermsAccepted(event.target.checked)} required /><div><label htmlFor="terms-consent">I agree to the</label> <Link to="/terms">Terms of use</Link> <span>and have read the</span> <Link to="/privacy">Privacy notice</Link>.</div></div></>}
+            <label htmlFor="auth-password">Password</label><div className="password-input-wrap"><input id="auth-password" type={showAuthPassword ? "text" : "password"} autoComplete={authMode === "register" ? "new-password" : "current-password"} minLength={6} maxLength={128} required value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} placeholder="At least 6 characters" /><button className="password-visibility-toggle" type="button" aria-label={showAuthPassword ? "Hide password" : "Show password"} aria-pressed={showAuthPassword} onClick={() => setShowAuthPassword((visible) => !visible)}><Icon name={showAuthPassword ? "eyeOff" : "eye"} size={17} /></button></div>
+            {authMode === "register" && <><label htmlFor="auth-password-confirm">Confirm password</label><div className="password-input-wrap"><input id="auth-password-confirm" type={showAuthPasswordConfirm ? "text" : "password"} autoComplete="new-password" minLength={6} maxLength={128} required value={authPasswordConfirm} onChange={(event) => setAuthPasswordConfirm(event.target.value)} placeholder="Type your password again" /><button className="password-visibility-toggle" type="button" aria-label={showAuthPasswordConfirm ? "Hide confirmation password" : "Show confirmation password"} aria-pressed={showAuthPasswordConfirm} onClick={() => setShowAuthPasswordConfirm((visible) => !visible)}><Icon name={showAuthPasswordConfirm ? "eyeOff" : "eye"} size={17} /></button></div><div className="terms-consent"><input id="terms-consent" aria-label="I agree to the Terms of use and have read the Privacy notice" type="checkbox" checked={termsAccepted} onChange={(event) => setTermsAccepted(event.target.checked)} required /><div><label htmlFor="terms-consent">I agree to the</label> <Link to="/terms">Terms of use</Link> <span>and have read the</span> <Link to="/privacy">Privacy notice</Link>.</div></div></>}
             {authMode === "register" && <span className="password-guidance">{emailPreviewAvailable
               ? "Use 6 or more characters. Verification links appear in a local-only demo inbox; no email is sent."
               : "Use 6 or more characters. No verification email or password recovery is available in this deployment; use an email you can access and keep your password safe."}</span>}

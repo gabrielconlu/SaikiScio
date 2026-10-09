@@ -665,6 +665,10 @@ h1, h2, h3, p { margin-top: 0; }
 .auth-form label, .account-form label { margin-top: 5px; color: #516251; font-size: 10px; font-weight: 700; }
 .auth-form input, .account-form input { width: 100%; min-height: 43px; padding: 10px 12px; border: 1px solid #e1e4da; border-radius: 8px; background: #fcfcf8; color: #34483a; font-size: 11px; }
 .auth-form input:focus, .account-form input:focus { border-color: #829b82; }
+.password-input-wrap { position: relative; }
+.password-input-wrap input { padding-right: 46px; }
+.password-visibility-toggle { display: inline-grid; position: absolute; top: 50%; right: 7px; width: 32px; height: 32px; place-items: center; transform: translateY(-50%); border: 0; border-radius: 6px; background: transparent; color: #718071; }
+.password-visibility-toggle:hover, .password-visibility-toggle:focus-visible { background: #eef1e9; color: #385741; }
 .auth-form .terms-consent input { width: 18px; min-height: 18px; height: 18px; margin: 1px 0 0; padding: 0; accent-color: #45694e; flex: 0 0 18px; }
 .terms-consent { display: flex; align-items: flex-start; gap: 10px; margin-top: 7px; padding: 12px 13px; border: 1px solid #e5e8df; border-radius: 9px; background: #f8f8f2; color: #687469; font-size: 10px; font-weight: 400 !important; line-height: 1.65; }
 .terms-consent > div { margin-top: -2px; }
